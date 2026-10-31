@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# RoboDojo calls this script to start the policy server on the host.
-# Arguments, in order:
-#   bench_name task_name ckpt_name env_cfg action_type seed policy_gpu policy_conda_env port host
 set -euo pipefail
-
-if [[ $# -lt 9 ]]; then
-  echo "用法: setup_eval_policy_server.sh bench task ckpt env_cfg action_type seed policy_gpu conda_env port [host]" >&2
+if [[ $# -lt 9 || "$5" != ee ]]; then
+  echo "Usage: $0 bench task checkpoint env_cfg ee seed gpu conda_env port [host]" >&2
   exit 2
 fi
-
-echo "Diffusion 评测服务还没有实现。" >&2
-echo "在你自己的环境 ${8} 里加载 checkpoint ${3}，监听 ${10:-127.0.0.1}:${9}，并按 16 维 ee 响应观测。" >&2
-exit 1
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+export PYTHONPATH="$ROOT/src:$ROOT/third_party:$ROOT/third_party/XPolicyLab:${PYTHONPATH:-}"
+export CUDA_VISIBLE_DEVICES="$7"
+cd "$ROOT"
+exec conda run --no-capture-output -n "$8" python -m starter.evaluation \
+  --kind diffusion --checkpoint "$3" --seed "$6" --port "$9" --host "${10:-127.0.0.1}" --device cuda:0

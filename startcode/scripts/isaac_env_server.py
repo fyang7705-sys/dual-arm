@@ -21,6 +21,9 @@ parser.add_argument("--port", type=int, required=True)
 parser.add_argument("--host", default="127.0.0.1")
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument("--once", action="store_true")
+parser.add_argument("--layout-source", choices=("random", "eval"), default="random")
+parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--domain-randomization", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -59,6 +62,8 @@ def main() -> None:
         }
     )
     requested = int(args.num_envs)
+    if requested < 1:
+        raise SystemExit("num_envs must be positive")
     width = resolve_random_task_num_envs(task_name, requested, env_cfg.sim)
     if width != requested:
         raise SystemExit(
@@ -68,9 +73,14 @@ def main() -> None:
     OmegaConf.update(env_cfg, "sim.scene.num_envs", width, force_add=True)
     # process_randomization reads eval_cfg. The online server is not an eval client,
     # so domain randomization stays off unless that block is filled in later.
-    OmegaConf.update(env_cfg, "eval_cfg", {"domain_randomization": {}}, force_add=True)
+    randomization = {key: bool(args.domain_randomization) for key in
+                     ("random_table", "random_ground", "random_background")}
+    OmegaConf.update(env_cfg, "eval_cfg", {"domain_randomization": randomization}, force_add=True)
     env_cfg = process_randomization(env_cfg)
     env_cfg, _eval_num = process_config(env_cfg, task_name=task_name)
+    # Keep only the permitted head-camera capture for online learning.
+    for camera in ("cam_left_wrist", "cam_right_wrist"):
+        OmegaConf.update(env_cfg, f"camera.annotator.{camera}.enabled", False, force_add=True)
     OmegaConf.update(env_cfg, "sim.scene.num_envs", width, force_add=True)
     # Official eval sets this from observation.collect_freq. Without it,
     # CameraManager treats default_frequency as a local and crashes while
@@ -82,12 +92,18 @@ def main() -> None:
         observation.get("collect_freq", 0),
         force_add=True,
     )
-    env_cfg.sim.seed = [0 for _ in range(width)]
+    env_cfg.sim.seed = [args.seed + index for index in range(width)]
+    OmegaConf.update(env_cfg, "sim.device", args.device, force_add=True)
     task = task_class(env_cfg, simulation_app)
     install_parallel_control(task, eval_cfg.get("observation", {}), task_name)
-    layout_count = bind_eval_layouts(task, task_name, args.env_cfg, seed=0)
-    print(f"[env] task {task_name} ready num_envs {width} layouts {layout_count}", flush=True)
-    serve(ParallelAdapter(task), args.host, args.port, once=args.once)
+    if args.layout_source == "eval":
+        bind_eval_layouts(task, task_name, args.env_cfg, seed=args.seed)
+    print(f"[env] task {task_name} ready num_envs {width} layouts={args.layout_source}", flush=True)
+    try:
+        serve(ParallelAdapter(task), args.host, args.port, once=args.once)
+    finally:
+        task.close()
+        simulation_app.close()
 
 
 if __name__ == "__main__":

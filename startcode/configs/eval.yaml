@@ -1,14 +1,14 @@
-# 评测只固定任务、动作和镜像侧的卡。checkpoint 与策略环境名由你填写。
-task: stack_blocks
+kind: act
+task: stack_blocks_random
 env_cfg: arx_x5
 action_type: ee
 seed: 0
-# native 使用任务配置里的条数。要少评就改成整数。
 eval_num: native
+num_envs: 1
 policy_gpu: 0
 env_gpu: 1
-# 你自己创建的 conda 环境名。没有策略镜像。
-policy_env: student
-# policies/diffusion 或 policies/act。
-policy_dir: policies/diffusion
-ckpt: student-checkpoint
+device: cuda:0
+env_launch: docker
+sim_image: stack-blocks-sim:isaacsim5.1
+# File path or completed run directory, override with --set ckpt=...
+ckpt: null

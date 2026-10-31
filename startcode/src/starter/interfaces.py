@@ -26,8 +26,8 @@ SUCCESS_SCORE = 100.0
 PARTIAL_SCORE = 15.0
 STEP_LIMIT = 550
 ENV_CFG = "arx_x5"
-EVAL_TASK = "stack_blocks"
-TRAIN_TASK = "stack_blocks"
+EVAL_TASK = "stack_blocks_random"
+TRAIN_TASK = "stack_blocks_random"
 BENCH_NAME = "RoboDojo"
 
 PRIVILEGED_KEYS = frozenset(
