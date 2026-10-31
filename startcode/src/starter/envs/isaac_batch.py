@@ -29,6 +29,16 @@ def install_parallel_control(task, observation_cfg: dict, task_name: str) -> Non
     )
     obs.initialize(task)
     task.online_obs = obs
+    task.online_invalid_flags = [False] * num_envs
+    original_reset = task.reset
+
+    def reset(seed=None, options=None):
+        result = original_reset(seed=seed, options=options)
+        task.online_invalid_flags = [False] * num_envs
+        task.online_obs.reset()
+        return result
+
+    task.reset = reset
 
     def get_obs_batch(env_idx_list=None):
         if env_idx_list is None:
@@ -43,12 +53,15 @@ def install_parallel_control(task, observation_cfg: dict, task_name: str) -> Non
         env_idx_list = list(env_idx_list)
         sequences = []
         for action, env_idx in zip(actions_list, env_idx_list):
+            task.online_invalid_flags[int(env_idx)] = False
             sequences.append(_control_sequence(task, action, int(env_idx), np))
         if not sequences:
             return
         task.robot_manager.control_manager.push(env_idx_list, sequences)
         while _controls_remain(task, env_idx_list):
-            meta = task.robot_manager.control_manager.pop(env_idx_list)
+            empty = set(task.robot_manager.control_manager.get_empty(env_idx_list))
+            remaining = [i for i in env_idx_list if i not in empty]
+            meta = task.robot_manager.control_manager.pop(remaining)
             task.robot_manager.control_robot(meta_control_list=meta)
             task.sim_step(render=False)
         if hasattr(task.reward_manager, "step"):
@@ -97,7 +110,7 @@ def bind_eval_layouts(task, task_name: str, config_name: str, seed: int = 0):
 
 def _controls_remain(task, env_idx_list) -> bool:
     empty = task.robot_manager.control_manager.get_empty(env_idx_list=env_idx_list)
-    return len(empty) == 0
+    return len(empty) < len(env_idx_list)
 
 
 def _control_sequence(task, action: dict, env_idx: int, np):
@@ -113,6 +126,8 @@ def _control_sequence(task, action: dict, env_idx: int, np):
         obs_name = task.robot_manager.process_name(robot.arm_name)
         if ik_result["status"] == "Success":
             control[obs_name] = {"position": ik_result["joint_value"]}
+        else:
+            task.online_invalid_flags[env_idx] = True
         gripper_key = task.robot_manager.process_name(robot.gripper_name)
         if robot.ee_type == "gripper":
             val = float(np.clip(action[gripper_key][0], 0, 1))

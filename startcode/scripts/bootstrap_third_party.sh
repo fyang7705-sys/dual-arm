@@ -19,8 +19,12 @@ clone_pin() {
     echo "missing pin for ${name}" >&2
     exit 1
   fi
-  if [[ ! -d "${dest}/.git" ]]; then
+  if [[ ! -e "${dest}/.git" ]]; then
     git clone --depth 1 "${url}" "${dest}"
+  fi
+  if [[ -n "$(git -C "${dest}" status --porcelain --untracked-files=no)" ]]; then
+    echo "Refusing to change a dirty dependency: ${dest}" >&2
+    exit 1
   fi
   git -C "${dest}" fetch --depth 1 origin "${pin}"
   git -C "${dest}" checkout "${pin}"
@@ -32,5 +36,15 @@ clone_pin XPolicyLab https://github.com/XPolicyLab/XPolicyLab.git
 
 mkdir -p "${ROOT}/third_party"
 ln -sfn "${ROOT}/data" "${ROOT}/third_party/data"
+ln -sfn "${ROOT}/third_party/RoboDojo/env_cfg" "${ROOT}/third_party/env_cfg"
+# One policy checkout serves both training imports and the simulator client.
+if [[ -d "${ROOT}/third_party/RoboDojo/XPolicyLab" && ! -L "${ROOT}/third_party/RoboDojo/XPolicyLab" ]]; then
+  rmdir "${ROOT}/third_party/RoboDojo/XPolicyLab" || {
+    echo "RoboDojo/XPolicyLab is nonempty; preserve it and reconcile the pinned policy checkout first." >&2
+    exit 1
+  }
+fi
+ln -sfn "${ROOT}/third_party/XPolicyLab" "${ROOT}/third_party/RoboDojo/XPolicyLab"
+python3 "${ROOT}/scripts/install_eval_adapters.py"
 echo "Submodules are pinned. RoboDojo's Isaac submodules are not initialized."
-echo "Build the simulator image from third_party/RoboDojo after: git submodule update --init --recursive"
+echo "Use the published simulator image, or initialize only IsaacLab/curobo when building your own image."
