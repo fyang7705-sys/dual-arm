@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+data/
+outputs/
+third_party/RoboDojo/
+third_party/XPolicyLab/
+third_party/data
+*.tar
+*.ckpt
+*.pt
+*.pkl
