@@ -1,13 +1,3 @@
-"""CPU smoke tests for the Diffusion Policy + DPPO implementation.
-
-They use synthetic tensors, so they run without Isaac, demonstrations or a GPU.
-Run with the startcode source on PYTHONPATH::
-
-    PYTHONPATH=/path/to/startcode/src python tests/test_smoke.py
-"""
-
-from __future__ import annotations
-
 import os
 import sys
 import tempfile
@@ -183,6 +173,52 @@ class DPPOAgentTest(unittest.TestCase):
         image, proprio = core.observation_to_arrays(observation)
         self.assertEqual(proprio.shape, (16,))
         self.assertEqual(image.shape, (32, 32, 3))
+
+
+class OptimizationTest(unittest.TestCase):
+    def test_dataset_returns_valid_mask(self):
+        episode = {
+            "images": np.zeros((5, 32, 32, 3), np.uint8),
+            "state": np.zeros((5, 16), np.float32),
+            "action": np.zeros((5, 16), np.float32),
+        }
+        dataset = core.EpisodeDataset(
+            [episode], [0], core.Normalization(np.zeros(16), np.ones(16), np.zeros(16), np.ones(16)),
+            chunk_size=4, augment=False,
+        )
+        item = dataset[4]
+        self.assertEqual(item["valid"].tolist(), [1.0, 0.0, 0.0, 0.0])
+
+    def test_prefix_logp_matches_sampling(self):
+        torch.manual_seed(7)
+        model = core.DiffusionPolicy(tiny_config())
+        images = torch.rand(2, 3, 32, 32)
+        proprio = torch.randn(2, 16)
+        _actions, chain = model.sample(
+            images, proprio, sample_steps=4, eta=0.8, stochastic_steps=2,
+            logp_prefix_dims=16, return_chain=True,
+        )
+        context = model.encode_obs(images, proprio)
+        batch = images.shape[0]
+        x_t = torch.stack([item["x_t"] for item in chain], dim=1)
+        x_prev = torch.stack([item["x_prev"] for item in chain], dim=1)
+        timesteps = torch.tensor([[item["t"] for item in chain]] * batch)
+        prev_timesteps = torch.tensor([[item["t_prev"] for item in chain]] * batch)
+        sigma = torch.tensor([item["sigma"] for item in chain])
+        repeated = context.unsqueeze(1).expand(batch, len(chain), -1).reshape(-1, 64)
+        old = torch.tensor([[float(item["logp"][i]) for item in chain] for i in range(batch)])
+        recomputed = model.chain_logp(
+            x_t.reshape(-1, 64), x_prev.reshape(-1, 64), repeated,
+            timesteps.reshape(-1), prev_timesteps.reshape(-1), sigma.repeat(batch),
+            prefix_dims=16,
+        ).reshape(batch, len(chain))
+        self.assertTrue(torch.allclose(recomputed, old, atol=1e-4))
+        full = model.chain_logp(
+            x_t.reshape(-1, 64), x_prev.reshape(-1, 64), repeated,
+            timesteps.reshape(-1), prev_timesteps.reshape(-1), sigma.repeat(batch),
+            prefix_dims=0,
+        ).reshape(batch, len(chain))
+        self.assertFalse(torch.allclose(full, recomputed))
 
 
 if __name__ == "__main__":

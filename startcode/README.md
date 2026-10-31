@@ -10,7 +10,8 @@
 用积木位姿做策略输入。
 
 完整文件说明、核心代码、服务器部署、命令与限制见
-[训练与仿真完整说明](../docs/TRAINING_AND_SIMULATION.md)。
+[训练与仿真完整说明](../docs/TRAINING_AND_SIMULATION.md)；进一步的
+算法优化清单见 [优化方案](../docs/OPTIMIZATION.md)。
 
 ## 快速命令
 

@@ -149,8 +149,13 @@ frames = decode_image_bit(episode["cam_head"])   # (T,H,W,3) RGB
 旧 JPEG 的通道顺序与 PIL 的假设相反，不要用 PIL 直接解。解码后缩放到 96×96，
 归一化到 `[-1,1]`；本体状态与动作按训练集均值/方差做 z-score（std 下限 1e-3）。
 
-动作块：当前步 `t` 取 `action[t:t+H]`，不足 H 时用最后一步补齐。离线训练
-同时预测未来 H 步；在线阶段按配置执行。
+动作块：当前步 `t` 取 `action[t:t+H]`，不足 H 时用最后一步补齐，同时返回
+`valid` mask；MSE/L1 只在有效步上求平均，避免把“重复最后一帧”当成监督信号。
+离线训练同时预测未来 H 步；在线阶段按配置执行。
+
+训练帧还会做随机裁剪（85%–95%）和轻微亮度/对比度抖动；验证与评测不做增强。
+示范与本体的四元数在加载时统一归一化并把 `qw` 规范到非负，消除 q 与 -q 的
+双覆盖歧义。
 
 ## 5. 路线 A：Diffusion Policy + DPPO
 
@@ -168,7 +173,10 @@ bash scripts/train_dp.sh
 - `dp_core.EpsilonNet`：对展平的 `H×16` 动作块预测噪声，条件为上下文和
   正弦时间编码；
 - DDPM 100 步线性 β；训练随机采 t，加噪后做 MSE；
-- AdamW 1e-4、200 epochs、EMA 0.999、warmup+cosine。
+- AdamW 1e-4、200 epochs、EMA 0.999、warmup+cosine；
+- 动作块 loss 带 padding mask；
+- 训练帧随机裁剪 + 亮度/对比度抖动（`augment: true`）；
+- 四元数加载时单位化并规范 `qw >= 0`。
 
 关键训练代码（`dp_core.DiffusionPolicy.training_loss`）：
 
@@ -194,6 +202,9 @@ bash scripts/train_dppo.sh
 
 脚本先读 `configs/dppo.yaml`，用 `run_online_env.sh` 启动 Isaac 容器，再在
 当前环境启动 DPPO。在线阶段从最新离线 checkpoint 的 EMA 权重继续。
+PPO 的链式 log-prob 只统计实际执行的前 16 维动作（`logp_prefix_dims: 16`）；
+策略与 critic 使用独立学习率（`learning_rate` / `critic_learning_rate`），
+`gamma` 默认 0.995。
 
 采样：8 步 DDIM；最后 `stochastic_steps=4` 个转移保留高斯噪声
 （σ 由调度给出并夹到 `[0.02,0.4]`）。每个环境步执行动作块的第一步
@@ -254,7 +265,8 @@ bash scripts/train_act_residual.sh
 ```
 
 基座 `eval()` + `requires_grad_(False)`，每 H 步刷新一次动作块；残差头每步读
-冻结的 512 维观测特征，输出 `u ~ N(mu, sigma^2)`，动作：
+冻结的 512 维观测特征，并拼接当前 base action（`residual_use_base_action: true`），
+输出 `u ~ N(mu, sigma^2)`，动作：
 
 ```python
 action = base_action + residual_scale * clamp(u, -1, 1)
@@ -363,10 +375,12 @@ PYTHONPATH=src python tests/test_act_smoke.py
 ```
 
 当前机器（Python 3.8、CPU 版 torch 2.4）结果：`test_env_data` 12 项、
-DP 冒烟 5 项、ACT 冒烟 5 项全部通过。冒烟测试覆盖：
+DP 冒烟 7 项、ACT 冒烟 7 项，共 26 项全部通过。冒烟测试覆盖：
 
 - 前向/反向、DDIM 采样；
 - 采样时与更新时链式 log-prob 一致（DPPO 正确性）；
+- 前缀 log-prob 与采样 log-prob 一致；
+- padding mask、数据集 valid 标记、残差头 base action 条件；
 - PPO / 残差 PPO 更新、GAE、checkpoint 存取；
 - ACT 基座指纹不变；
 - 离线/在线 runtime、RoboDojo 原始观测转换、四元数/夹爪投影。
@@ -385,3 +399,12 @@ DP 冒烟 5 项、ACT 冒烟 5 项全部通过。冒烟测试覆盖：
 训练脚本输出当作结果，也没有使用预训练视觉大模型。原 `branch_w` 的实现
 （binary reward、`stack_blocks_random`、`models/offline/online/runtime`
 架构）已被本版本替换。
+
+
+## 12. 优化方向
+
+两条路线当前实现与论文的差距、按优先级排序的改法和实验计划，见
+[优化空间与成功率提升方案](OPTIMIZATION.md)。本轮已实现：动作块 padding
+mask、四元数规范化、图像增强、DPPO 前缀 log-prob、残差头 base action、
+critic 独立学习率与 gamma=0.995；下一步优先级最高的是 2 帧观测历史和评测
+temporal ensembling。

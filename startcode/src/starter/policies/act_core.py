@@ -220,9 +220,15 @@ class ActPolicy(nn.Module):
         image: torch.Tensor,
         proprio: torch.Tensor,
         action: torch.Tensor,
+        valid: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         prediction, mu, logvar = self.forward(image, proprio, action, use_latent=True)
-        l1 = F.l1_loss(prediction, action)
+        per_step = F.l1_loss(prediction, action, reduction="none").mean(dim=-1)
+        if valid is None:
+            l1 = per_step.mean()
+        else:
+            mask = valid.to(per_step.device, per_step.dtype)
+            l1 = (per_step * mask).sum() / mask.sum().clamp(min=1.0)
         kl = -0.5 * torch.sum(1.0 + logvar - mu.pow(2) - logvar.exp(), dim=-1).mean()
         kl_weight = float(cfg_get(self.config, "kl_weight", 10.0))
         loss = l1 + kl_weight * kl
@@ -253,17 +259,20 @@ class ResidualHead(nn.Module):
         action_dim: int = ACTION_DIM,
         residual_scales: Optional[Sequence[float]] = None,
         initial_std: float = 0.3,
+        use_base_action: bool = False,
     ) -> None:
         super().__init__()
         self.action_dim = int(action_dim)
+        self.use_base_action = bool(use_base_action)
         if residual_scales is None:
             residual_scales = default_residual_scales()
         scales = torch.as_tensor(list(residual_scales), dtype=torch.float32)
         if scales.numel() != self.action_dim:
             raise ValueError(f"Expected {self.action_dim} residual scales, got {scales.numel()}.")
         self.register_buffer("scales", scales)
+        input_dim = feature_dim + self.action_dim if self.use_base_action else feature_dim
         self.net = nn.Sequential(
-            nn.Linear(feature_dim, hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.SiLU(inplace=True),
             nn.Linear(hidden_dim, hidden_dim),
@@ -273,14 +282,24 @@ class ResidualHead(nn.Module):
         )
         self.log_std = nn.Parameter(torch.full((self.action_dim,), math.log(max(initial_std, 1e-3))))
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
+    def forward(self, features: torch.Tensor, base_action: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if self.use_base_action:
+            if base_action is None:
+                raise ValueError("ResidualHead was built with use_base_action=True but got no base action")
+            features = torch.cat([features, base_action], dim=-1)
         return self.net(features)
 
     def std(self, std_min: float = 0.05, std_max: float = 0.5) -> torch.Tensor:
         return F.softplus(self.log_std).clamp(min=std_min, max=std_max)
 
-    def sample(self, features: torch.Tensor, std_min: float = 0.05, std_max: float = 0.5):
-        mean = self.forward(features)
+    def sample(
+        self,
+        features: torch.Tensor,
+        base_action: Optional[torch.Tensor] = None,
+        std_min: float = 0.05,
+        std_max: float = 0.5,
+    ):
+        mean = self.forward(features, base_action)
         std = self.std(std_min, std_max).expand_as(mean)
         noise = torch.randn_like(mean)
         u = mean + std * noise
@@ -289,8 +308,10 @@ class ResidualHead(nn.Module):
     def residual(self, u: torch.Tensor) -> torch.Tensor:
         return self.scales * u.clamp(-1.0, 1.0)
 
-    def deterministic_residual(self, features: torch.Tensor) -> torch.Tensor:
-        return self.residual(self.forward(features))
+    def deterministic_residual(
+        self, features: torch.Tensor, base_action: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        return self.residual(self.forward(features, base_action))
 
 
 def default_residual_scales() -> List[float]:
@@ -411,8 +432,8 @@ def load_demo_episodes(config: Dict[str, Any]) -> List[Dict[str, np.ndarray]]:
     episodes: List[Dict[str, np.ndarray]] = []
     for index, path in enumerate(files):
         episode = read_episode(path)
-        states = np.asarray(episode["state"], dtype=np.float32)
-        actions = np.asarray(episode["action"], dtype=np.float32)
+        states = canonicalize_quaternions(np.asarray(episode["state"], dtype=np.float32))
+        actions = canonicalize_quaternions(np.asarray(episode["action"], dtype=np.float32))
         frames = _decode_stored_frames(episode["cam_head"], decoder)
         length = min(len(states), len(actions), len(frames))
         if length < 2:
@@ -450,10 +471,12 @@ class EpisodeDataset(torch.utils.data.Dataset):
         indices: Sequence[int],
         normalization: Normalization,
         chunk_size: int,
+        augment: bool = False,
     ) -> None:
         self.episodes = episodes
         self.normalization = normalization
         self.chunk_size = int(chunk_size)
+        self.augment = bool(augment)
         self.samples: List[Tuple[int, int]] = [
             (int(episode_index), step)
             for episode_index in indices
@@ -469,14 +492,49 @@ class EpisodeDataset(torch.utils.data.Dataset):
         length = len(episode["action"])
 
         image = torch.from_numpy(episode["images"][step]).permute(2, 0, 1).float() / 255.0
+        if self.augment:
+            image = augment_image(image)
         image = (image - IMAGE_MEAN) / IMAGE_STD
         state = self.normalization.normalize_state(torch.from_numpy(episode["state"][step]).float())
         chunk = np.stack(
             [episode["action"][min(step + offset, length - 1)] for offset in range(self.chunk_size)],
             axis=0,
         )
+        valid = np.zeros(self.chunk_size, dtype=np.float32)
+        for offset in range(self.chunk_size):
+            valid[offset] = 1.0 if step + offset < length else 0.0
         action = self.normalization.normalize_action(torch.from_numpy(chunk).float())
-        return {"image": image, "state": state, "action": action}
+        return {"image": image, "state": state, "action": action, "valid": torch.from_numpy(valid)}
+
+
+def augment_image(image: torch.Tensor) -> torch.Tensor:
+    """Random crop + mild brightness/contrast jitter on a float CHW image in [0,1]."""
+
+    height, width = image.shape[-2:]
+    scale = random.uniform(0.85, 0.95)
+    crop_h, crop_w = max(1, int(height * scale)), max(1, int(width * scale))
+    top = random.randint(0, max(0, height - crop_h))
+    left = random.randint(0, max(0, width - crop_w))
+    cropped = image[:, top : top + crop_h, left : left + crop_w].unsqueeze(0)
+    image = F.interpolate(cropped, size=(height, width), mode="bilinear", align_corners=False).squeeze(0)
+    brightness = random.uniform(0.9, 1.1)
+    contrast = random.uniform(0.9, 1.1)
+    image = (image * brightness).clamp(0.0, 1.0)
+    mean = image.mean(dim=(-2, -1), keepdim=True)
+    return ((image - mean) * contrast + mean).clamp(0.0, 1.0)
+
+
+def canonicalize_quaternions(vector: np.ndarray) -> np.ndarray:
+    """Unit-normalize and canonicalize (qw >= 0) both ee quaternion blocks."""
+
+    vector = np.asarray(vector, dtype=np.float32).copy()
+    for start in (3, 11):
+        quaternion = vector[:, start : start + 4]
+        norm = np.linalg.norm(quaternion, axis=1, keepdims=True)
+        quaternion = quaternion / np.clip(norm, 1e-8, None)
+        sign = np.where(quaternion[:, 0:1] >= 0.0, 1.0, -1.0).astype(np.float32)
+        vector[:, start : start + 4] = quaternion * sign
+    return vector
 
 
 def prepare_image(image: Any, size: int = 96) -> torch.Tensor:
@@ -581,6 +639,7 @@ class ActRuntime:
                 action_dim=int(payload.get("action_dim", ACTION_DIM)),
                 residual_scales=payload.get("residual_scales"),
                 initial_std=float(cfg_get(config, "residual_initial_std", 0.3)),
+                use_base_action=bool(cfg_get(config, "residual_use_base_action", False)),
             )
             self.residual.load_state_dict(payload["residual"])
             self.residual.to(device).eval()
@@ -609,7 +668,7 @@ class ActRuntime:
         base_chunk = self.normalization.unnormalize_action(normalized_chunk)[0]
         if self.is_residual:
             _memory, features = self.base.encode_obs(image_tensor, proprio_tensor)
-            residual = self.residual.deterministic_residual(features)[0]
+            residual = self.residual.deterministic_residual(features, base_chunk[0:1])[0]
             action = base_chunk[0] + residual
             actions = action.unsqueeze(0)
         else:

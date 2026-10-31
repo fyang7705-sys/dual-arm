@@ -121,8 +121,10 @@ class ActResidualAgent:
         self.max_steps = int(cfg_get(config, "rollout_max_steps", 550))
 
         self.optimizer = torch.optim.AdamW(
-            list(self.residual.parameters()) + list(self.critic.parameters()),
-            lr=float(cfg_get(config, "learning_rate", 3e-4)),
+            [
+                {"params": list(self.residual.parameters()), "lr": float(cfg_get(config, "learning_rate", 3e-4))},
+                {"params": list(self.critic.parameters()), "lr": float(cfg_get(config, "critic_learning_rate", 3e-4))},
+            ],
             weight_decay=float(cfg_get(config, "weight_decay", 1e-4)),
         )
         self.global_steps = 0
@@ -209,15 +211,14 @@ class ActResidualAgent:
             images = torch.stack([observations[index][0] for index in active])
             proprios = torch.stack([observations[index][1] for index in active])
             features = self._features(images, proprios)
-            mean, std, u = self.residual.sample(features, self.std_min, self.std_max)
-            residual = self.residual.residual(u)
-            logp = _gaussian_logp(u, mean, std)
-            values = self.critic(features)
-
             base_norm = torch.stack(
                 [chunks[index][chunk_indices[index]] for index in active], dim=0
             )
-            base_actions = self.normalization.unnormalize_action(base_norm)
+            base_actions = self.normalization.unnormalize_action(base_norm).to(features.device)
+            mean, std, u = self.residual.sample(features, base_actions, self.std_min, self.std_max)
+            residual = self.residual.residual(u)
+            logp = _gaussian_logp(u, mean, std)
+            values = self.critic(features)
             env_actions = self._final_actions(base_actions, residual)
 
             results = env.step_batch(env_actions.cpu().tolist(), active)
@@ -308,6 +309,7 @@ class ActResidualAgent:
         features = torch.stack([item.features for item in transitions], dim=0)
         values_target = torch.tensor([item.returns for item in transitions], dtype=torch.float32)
         advantages = torch.tensor([item.advantage for item in transitions], dtype=torch.float32)
+        base_actions = torch.stack([item.base_action for item in transitions], dim=0)
         u_target = torch.stack([item.u for item in transitions], dim=0)
         old_logp = torch.tensor([item.logp for item in transitions], dtype=torch.float32)
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -323,7 +325,7 @@ class ActResidualAgent:
             for start in range(0, count, self.minibatch_size):
                 indices = permutation[start : start + self.minibatch_size]
                 batch_features = features[indices].to(self.device)
-                mean = self.residual.forward(batch_features)
+                mean = self.residual.forward(batch_features, base_actions[indices].to(self.device))
                 std = self.residual.std(self.std_min, self.std_max).expand_as(mean)
                 new_logp = _gaussian_logp(u_target[indices].to(self.device), mean, std)
                 old = old_logp[indices].to(self.device)

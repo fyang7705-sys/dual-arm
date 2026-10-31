@@ -46,15 +46,17 @@ stochastic_steps: 4       # last N transitions are Gaussian PPO actions
 eta: 0.8                  # noise injected into those transitions
 std_min: 0.02
 std_max: 0.4
+logp_prefix_dims: 16      # PPO likelihood only on the executed 16-D first action
 
 # PPO.
-gamma: 0.99
+gamma: 0.995
 gae_lambda: 0.95
 gamma_diff: 0.9           # discount along the denoising chain
 clip_ratio: 0.2
 ppo_epochs: 4
 minibatch_size: 64
-learning_rate: 0.00005
+learning_rate: 0.00005      # policy
+critic_learning_rate: 0.0003
 weight_decay: 0.0001
 value_coef: 0.5
 max_grad_norm: 0.5

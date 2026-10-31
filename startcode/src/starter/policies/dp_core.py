@@ -298,6 +298,7 @@ class DiffusionPolicy(nn.Module):
         image: torch.Tensor,
         proprio: torch.Tensor,
         action: torch.Tensor,
+        valid: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         batch = image.shape[0]
         flat = action.reshape(batch, -1)
@@ -306,7 +307,13 @@ class DiffusionPolicy(nn.Module):
         x_t = self.q_sample(flat, timesteps, noise)
         context = self.encode_obs(image, proprio)
         predicted = self.predict_eps(x_t, context, timesteps)
-        return F.mse_loss(predicted, noise)
+        per_step = F.mse_loss(predicted, noise, reduction="none")
+        if valid is None:
+            return per_step.mean()
+        mask = valid.to(per_step.device, per_step.dtype).reshape(batch, -1)
+        per_step = per_step.reshape(batch, self.chunk_size, self.action_dim)
+        masked = per_step * mask.unsqueeze(-1)
+        return masked.sum() / (mask.sum() * self.action_dim).clamp(min=1.0)
 
     # -- sampling -----------------------------------------------------------------
     def _ddim_components(
@@ -347,6 +354,7 @@ class DiffusionPolicy(nn.Module):
         std_max: float = 0.5,
         generator: Optional[torch.Generator] = None,
         return_chain: bool = False,
+        logp_prefix_dims: int = 0,
     ):
         """Sample a normalized action chunk.
 
@@ -373,7 +381,14 @@ class DiffusionPolicy(nn.Module):
             if sigma > 0.0:
                 noise = torch.randn(batch, self.flat_action_dim, device=x.device, generator=generator)
                 x_prev = mean + sigma * noise
-                logp = gaussian_logp(x_prev, mean, sigma)
+                if 0 < int(logp_prefix_dims) < x_prev.shape[-1]:
+                    logp = gaussian_logp(
+                        x_prev[..., : int(logp_prefix_dims)],
+                        mean[..., : int(logp_prefix_dims)],
+                        sigma,
+                    )
+                else:
+                    logp = gaussian_logp(x_prev, mean, sigma)
                 chain.append(
                     {
                         "t": int(t),
@@ -405,8 +420,14 @@ class DiffusionPolicy(nn.Module):
         timesteps: torch.Tensor,
         t_prev: torch.Tensor,
         sigma: torch.Tensor,
+        prefix_dims: int = 0,
     ) -> torch.Tensor:
-        """Recompute the Gaussian log-probability of stored DDIM transitions."""
+        """Recompute the Gaussian log-probability of stored DDIM transitions.
+
+        ``prefix_dims`` restricts the likelihood to the action dimensions that
+        are actually executed (the first 16 values of the chunk), which keeps
+        PPO credit assignment aligned with the environment action.
+        """
 
         eps = self.predict_eps(x_t, context, timesteps)
         alpha_t = self.alpha_bars.to(x_t.dtype)[timesteps].unsqueeze(-1)
@@ -416,6 +437,10 @@ class DiffusionPolicy(nn.Module):
         base = (1.0 - alpha_prev - sigma_col * sigma_col).clamp(min=1e-8).sqrt()
         mean = alpha_prev.sqrt() * x0 + base * eps
         var = (sigma_col * sigma_col).clamp(min=1e-12)
+        if 0 < int(prefix_dims) < x_prev.shape[-1]:
+            x_prev = x_prev[..., : int(prefix_dims)]
+            mean = mean[..., : int(prefix_dims)]
+            var = var[..., : int(prefix_dims)]
         logp = -0.5 * (((x_prev - mean) ** 2) / var + torch.log(2.0 * math.pi * var))
         return logp.sum(dim=-1)
 
@@ -580,8 +605,8 @@ def load_demo_episodes(config: Dict[str, Any]) -> List[Dict[str, np.ndarray]]:
     episodes: List[Dict[str, np.ndarray]] = []
     for index, path in enumerate(files):
         episode = read_episode(path)
-        states = np.asarray(episode["state"], dtype=np.float32)
-        actions = np.asarray(episode["action"], dtype=np.float32)
+        states = canonicalize_quaternions(np.asarray(episode["state"], dtype=np.float32))
+        actions = canonicalize_quaternions(np.asarray(episode["action"], dtype=np.float32))
         frames = _decode_stored_frames(episode["cam_head"], decoder)
         length = min(len(states), len(actions), len(frames))
         if length < 2:
@@ -621,10 +646,12 @@ class EpisodeDataset(torch.utils.data.Dataset):
         indices: Sequence[int],
         normalization: Normalization,
         chunk_size: int,
+        augment: bool = False,
     ) -> None:
         self.episodes = episodes
         self.normalization = normalization
         self.chunk_size = int(chunk_size)
+        self.augment = bool(augment)
         self.samples: List[Tuple[int, int]] = []
         for episode_index in indices:
             length = len(self.episodes[episode_index]["action"])
@@ -643,6 +670,8 @@ class EpisodeDataset(torch.utils.data.Dataset):
         length = len(actions)
 
         image = torch.from_numpy(images[step]).permute(2, 0, 1).float() / 255.0
+        if self.augment:
+            image = augment_image(image)
         image = (image - IMAGE_MEAN) / IMAGE_STD
         state = torch.from_numpy(states[step]).float()
         state = self.normalization.normalize_state(state)
@@ -651,9 +680,42 @@ class EpisodeDataset(torch.utils.data.Dataset):
             [actions[min(step + offset, length - 1)] for offset in range(self.chunk_size)],
             axis=0,
         )
+        valid = np.zeros(self.chunk_size, dtype=np.float32)
+        for offset in range(self.chunk_size):
+            valid[offset] = 1.0 if step + offset < length else 0.0
         chunk = torch.from_numpy(chunk).float()
         chunk = self.normalization.normalize_action(chunk)
-        return {"image": image, "state": state, "action": chunk}
+        return {"image": image, "state": state, "action": chunk, "valid": torch.from_numpy(valid)}
+
+
+def augment_image(image: torch.Tensor) -> torch.Tensor:
+    """Random crop + mild brightness/contrast jitter on a float CHW image in [0,1]."""
+
+    height, width = image.shape[-2:]
+    scale = random.uniform(0.85, 0.95)
+    crop_h, crop_w = max(1, int(height * scale)), max(1, int(width * scale))
+    top = random.randint(0, max(0, height - crop_h))
+    left = random.randint(0, max(0, width - crop_w))
+    cropped = image[:, top : top + crop_h, left : left + crop_w].unsqueeze(0)
+    image = F.interpolate(cropped, size=(height, width), mode="bilinear", align_corners=False).squeeze(0)
+    brightness = random.uniform(0.9, 1.1)
+    contrast = random.uniform(0.9, 1.1)
+    image = (image * brightness).clamp(0.0, 1.0)
+    mean = image.mean(dim=(-2, -1), keepdim=True)
+    return ((image - mean) * contrast + mean).clamp(0.0, 1.0)
+
+
+def canonicalize_quaternions(vector: np.ndarray) -> np.ndarray:
+    """Unit-normalize and canonicalize (qw >= 0) both ee quaternion blocks."""
+
+    vector = np.asarray(vector, dtype=np.float32).copy()
+    for start in (3, 11):
+        quaternion = vector[:, start : start + 4]
+        norm = np.linalg.norm(quaternion, axis=1, keepdims=True)
+        quaternion = quaternion / np.clip(norm, 1e-8, None)
+        sign = np.where(quaternion[:, 0:1] >= 0.0, 1.0, -1.0).astype(np.float32)
+        vector[:, start : start + 4] = quaternion * sign
+    return vector
 
 
 def prepare_image(image: Any, size: int = 96) -> torch.Tensor:

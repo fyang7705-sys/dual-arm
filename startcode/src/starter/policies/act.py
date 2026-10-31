@@ -68,6 +68,7 @@ DEFAULT_OFFLINE: Dict[str, Any] = {
     "warmup_steps": 500,
     "grad_clip": 1.0,
     "val_ratio": 0.1,
+    "augment": True,
     "num_workers": 2,
     "save_every": 25,
     "log_every": 20,
@@ -124,8 +125,16 @@ def train_offline(config: Dict[str, Any]) -> None:
         flush=True,
     )
 
-    train_dataset = EpisodeDataset(episodes, train_indices, normalization, int(cfg_get(config, "chunk_size", 16)))
-    val_dataset = EpisodeDataset(episodes, val_indices, normalization, int(cfg_get(config, "chunk_size", 16)))
+    train_dataset = EpisodeDataset(
+        episodes,
+        train_indices,
+        normalization,
+        int(cfg_get(config, "chunk_size", 16)),
+        augment=bool(cfg_get(config, "augment", True)),
+    )
+    val_dataset = EpisodeDataset(
+        episodes, val_indices, normalization, int(cfg_get(config, "chunk_size", 16)), augment=False
+    )
     num_workers = int(cfg_get(config, "num_workers", 2))
     train_loader = DataLoader(
         train_dataset,
@@ -174,7 +183,7 @@ def train_offline(config: Dict[str, Any]) -> None:
                 states = batch["state"].to(device, non_blocking=True)
                 actions = batch["action"].to(device, non_blocking=True)
                 optimizer.zero_grad(set_to_none=True)
-                loss, stats = model.training_loss(images, states, actions)
+                loss, stats = model.training_loss(images, states, actions, batch["valid"].to(device))
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg_get(config, "grad_clip", 1.0)))
                 optimizer.step()
@@ -201,6 +210,7 @@ def train_offline(config: Dict[str, Any]) -> None:
                         batch["image"].to(device),
                         batch["state"].to(device),
                         batch["action"].to(device),
+                        batch["valid"].to(device),
                     )
                     val_total += float(loss.detach().cpu())
                     val_batches += 1
@@ -357,6 +367,7 @@ def train_online(config: Dict[str, Any]) -> None:
         action_dim=base.action_dim,
         residual_scales=scales,
         initial_std=float(cfg_get(config, "residual_initial_std", 0.3)),
+        use_base_action=bool(cfg_get(config, "residual_use_base_action", True)),
     ).to(device)
     critic = ResidualCritic(
         feature_dim=base.feature_dim,
@@ -394,6 +405,7 @@ def train_online(config: Dict[str, Any]) -> None:
                 "feature_dim": base.feature_dim,
                 "action_dim": base.action_dim,
                 "residual_scales": scales,
+                "residual_use_base_action": bool(cfg_get(config, "residual_use_base_action", True)),
                 "image_size": base.image_size,
                 "chunk_size": base.chunk_size,
                 **extra,

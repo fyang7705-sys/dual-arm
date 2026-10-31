@@ -65,6 +65,7 @@ DEFAULT_TRAIN_KEYS: Dict[str, Any] = {
     "warmup_steps": 500,
     "grad_clip": 1.0,
     "val_ratio": 0.1,
+    "augment": True,
     "num_workers": 2,
     "ema_decay": 0.999,
     "save_every": 20,
@@ -125,8 +126,16 @@ def train_offline(config: Dict[str, Any]) -> None:
         flush=True,
     )
 
-    train_dataset = EpisodeDataset(episodes, train_indices, normalization, int(cfg_get(config, "chunk_size", 8)))
-    val_dataset = EpisodeDataset(episodes, val_indices, normalization, int(cfg_get(config, "chunk_size", 8)))
+    train_dataset = EpisodeDataset(
+        episodes,
+        train_indices,
+        normalization,
+        int(cfg_get(config, "chunk_size", 8)),
+        augment=bool(cfg_get(config, "augment", True)),
+    )
+    val_dataset = EpisodeDataset(
+        episodes, val_indices, normalization, int(cfg_get(config, "chunk_size", 8)), augment=False
+    )
     num_workers = int(cfg_get(config, "num_workers", 2))
     train_loader = DataLoader(
         train_dataset,
@@ -184,7 +193,7 @@ def train_offline(config: Dict[str, Any]) -> None:
                     torch.autocast(device_type="cuda", enabled=True) if use_amp else nullcontext()
                 )
                 with amp_context:
-                    loss = model.training_loss(images, states, actions)
+                    loss = model.training_loss(images, states, actions, batch["valid"].to(device))
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(cfg_get(config, "grad_clip", 1.0)))
@@ -212,7 +221,7 @@ def train_offline(config: Dict[str, Any]) -> None:
                     images = batch["image"].to(device)
                     states = batch["state"].to(device)
                     actions = batch["action"].to(device)
-                    loss = model.training_loss(images, states, actions)
+                    loss = model.training_loss(images, states, actions, batch["valid"].to(device))
                     val_total += float(loss.detach().cpu())
                     val_batches += 1
             val_loss = val_total / max(val_batches, 1)

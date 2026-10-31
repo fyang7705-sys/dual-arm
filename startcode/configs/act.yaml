@@ -12,6 +12,7 @@ seed: 0
 data_path: data/RoboDojo/stack_blocks/arx_x5
 max_episodes: 0
 val_ratio: 0.1
+augment: true             # random crop + brightness/contrast on training frames
 
 # Observation / action layout.
 state_dim: 16

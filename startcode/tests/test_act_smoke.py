@@ -1,13 +1,3 @@
-"""CPU smoke tests for ACT + residual PPO.
-
-Synthetic tensors only: no Isaac, no demonstrations, no GPU needed.
-Run with the startcode source on PYTHONPATH::
-
-    PYTHONPATH=/path/to/startcode/src python tests/test_smoke.py
-"""
-
-from __future__ import annotations
-
 import os
 import sys
 import tempfile
@@ -182,6 +172,34 @@ class ActModelTest(unittest.TestCase):
         image, proprio = core.observation_to_arrays(observation)
         self.assertEqual(proprio.shape, (16,))
         self.assertEqual(image.shape, (32, 32, 3))
+
+
+class OptimizationTest(unittest.TestCase):
+    def test_dataset_returns_valid_mask(self):
+        episode = {
+            "images": np.zeros((5, 32, 32, 3), np.uint8),
+            "state": np.zeros((5, 16), np.float32),
+            "action": np.zeros((5, 16), np.float32),
+        }
+        dataset = core.EpisodeDataset(
+            [episode], [0], normalization(), chunk_size=4, augment=False,
+        )
+        item = dataset[4]
+        self.assertEqual(item["valid"].tolist(), [1.0, 0.0, 0.0, 0.0])
+
+    def test_residual_head_uses_base_action(self):
+        torch.manual_seed(8)
+        head = core.ResidualHead(
+            64, 32, 16, core.default_residual_scales(), 0.3, use_base_action=True
+        )
+        features = torch.randn(2, 64)
+        base_a = torch.zeros(2, 16)
+        base_b = torch.ones(2, 16)
+        self.assertFalse(torch.allclose(head(features, base_a), head(features, base_b)))
+        mean, std, u = head.sample(features, base_a)
+        self.assertEqual(mean.shape, (2, 16))
+        self.assertEqual(std.shape, (2, 16))
+        self.assertEqual(u.shape, (2, 16))
 
 
 if __name__ == "__main__":

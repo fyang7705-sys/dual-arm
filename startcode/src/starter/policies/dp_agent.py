@@ -117,11 +117,14 @@ class DPPOAgent:
         self.eta = float(cfg_get(config, "eta", 0.8))
         self.std_min = float(cfg_get(config, "std_min", 0.02))
         self.std_max = float(cfg_get(config, "std_max", 0.4))
+        self.logp_prefix_dims = int(cfg_get(config, "logp_prefix_dims", 16))
         self.max_steps = int(cfg_get(config, "rollout_max_steps", 550))
 
         self.optimizer = torch.optim.AdamW(
-            list(self.model.parameters()) + list(self.critic.parameters()),
-            lr=float(cfg_get(config, "learning_rate", 5e-5)),
+            [
+                {"params": list(self.model.parameters()), "lr": float(cfg_get(config, "learning_rate", 5e-5))},
+                {"params": list(self.critic.parameters()), "lr": float(cfg_get(config, "critic_learning_rate", 3e-4))},
+            ],
             weight_decay=float(cfg_get(config, "weight_decay", 1e-4)),
         )
         self.global_steps = 0
@@ -147,6 +150,7 @@ class DPPOAgent:
             std_min=self.std_min,
             std_max=self.std_max,
             return_chain=True,
+            logp_prefix_dims=self.logp_prefix_dims,
         )
         values = self.critic(normalized_images, proprios)
         per_sample_chain: List[List[Dict[str, Any]]] = [[] for _ in range(images.shape[0])]
@@ -374,7 +378,13 @@ class DPPOAgent:
                 flat_sigma = sigmas.unsqueeze(0).expand(batch, chain_length).reshape(-1).to(self.device)
 
                 new_logp = self.model.chain_logp(
-                    flat_x, flat_prev, context_repeated, flat_t, flat_t_prev, flat_sigma
+                    flat_x,
+                    flat_prev,
+                    context_repeated,
+                    flat_t,
+                    flat_t_prev,
+                    flat_sigma,
+                    prefix_dims=self.logp_prefix_dims,
                 ).reshape(batch, chain_length)
                 old = old_logp[indices].to(self.device)
                 log_ratio = (new_logp - old).clamp(min=-20.0, max=20.0)

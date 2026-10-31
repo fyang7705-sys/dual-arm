@@ -11,7 +11,8 @@
 任务固定为 `stack_blocks`，不修改环境奖励，不使用积木位姿作为策略输入。
 
 完整文件说明、核心代码、服务器部署、全部命令、评测与已知限制见
-[训练与仿真完整说明](docs/TRAINING_AND_SIMULATION.md)。
+[训练与仿真完整说明](docs/TRAINING_AND_SIMULATION.md) 与
+[优化空间与成功率提升方案](docs/OPTIMIZATION.md)。
 
 ```bash
 cd startcode
