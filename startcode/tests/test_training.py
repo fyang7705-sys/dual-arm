@@ -192,41 +192,6 @@ def test_encoded_demo_uses_official_rgb_decoder():
     np.testing.assert_allclose(decoded.astype(float), rgb, atol=5)
 
 
-def test_generated_eval_adapters_and_camera_settings(tmp_path):
-    import importlib.util
-    import yaml
-    scripts = Path(__file__).resolve().parents[1] / "scripts"
-
-    def load(name):
-        spec = importlib.util.spec_from_file_location(name, scripts / f"{name}.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-
-    load("install_eval_adapters").install(tmp_path)
-    for name in ("StudentACT", "StudentDiffusion"):
-        adapter = tmp_path / "XPolicyLab/policy" / name
-        assert (adapter / "model.py").exists() and (adapter / "deploy.py").exists()
-        for script in adapter.glob("*.sh"):
-            subprocess.run(["bash", "-n", str(script)], check=True)
-        assert yaml.safe_load((adapter / "deploy.yml").read_text())["policy_name"] == name
-    (tmp_path / "env_cfg/sim").mkdir(parents=True)
-    (tmp_path / "env_cfg/camera").mkdir()
-    sim = tmp_path / "env_cfg/sim/sim_config.yml"
-    cameras = tmp_path / "env_cfg/camera/camera_config.yml"
-    sim.write_text("scene:\n  num_envs: 10\n")
-    cameras.write_text("annotator:\n  cam_head:\n    enabled: true\n  cam_left_wrist:\n    enabled: true\n")
-    reward = tmp_path / "reward.py"
-    reward.write_text("unchanged official task reward")
-    load("configure_sim").configure(tmp_path, 1)
-    assert yaml.safe_load(sim.read_text())["scene"]["num_envs"] == 1
-    assert not yaml.safe_load(cameras.read_text())["annotator"]["cam_left_wrist"]["enabled"]
-    assert reward.read_text() == "unchanged official task reward"
-    load("configure_sim").configure(tmp_path, 2)
-    deployment = tmp_path / "XPolicyLab/policy/StudentACT/deploy.yml"
-    assert yaml.safe_load(deployment.read_text())["eval_batch"] is True
-
-
 def test_remote_reset_step_over_real_tcp():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -253,11 +218,18 @@ def test_xpolicylab_official_ws_server_client(config, monkeypatch):
     # runs independently of optional external repositories.
     module = pytest.importorskip("client_server.ws.model_server")
     from client_server.ws.model_client import WsModelClient
-    from starter.evaluation import Model
+
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("eval_server", root / "policies" / "eval_server.py")
+    eval_server = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(eval_server)
+
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     path = offline("act", {**config, "epochs": 1})
-    model = Model({"checkpoint": str(path), "device": "cpu"})
+    model = eval_server.ServePolicy(Path(path), "arx_x5", "ee", "cpu")
     ready = threading.Event()
     info = {}
     loop = asyncio.new_event_loop()

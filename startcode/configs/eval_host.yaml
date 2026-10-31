@@ -1,0 +1,25 @@
+# 宿主机直跑评测（scripts/eval_host.sh）：Isaac Sim 用本地 conda 环境，
+# 不需要 docker 镜像。configs/eval.yaml 保持原样给 scripts/eval_policy.sh 用。
+task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+# native 用任务配置里的条数；要少评就改成整数，例如 1。
+eval_num: native
+
+# 策略进程和 Isaac 必须用不同的卡。
+policy_gpu: 0
+env_gpu: 1
+
+# 策略服务用的 conda 环境，以及 Isaac 客户端用的 conda 环境。
+policy_env: robodojo
+sim_env: robodojo
+
+# 服务端：policies/act/setup_eval_policy_server.sh 启动本仓库的 ACT 服务。
+# ckpt 可以是 latest、outputs/act 下的目录/文件名，或 .ckpt 的绝对路径。
+policy_dir: policies/act
+ckpt: latest
+
+# 客户端：RoboDojo 按目录名 import XPolicyLab.policy.<名字>.deploy。
+# 上游 ACT 的 deploy.py 是通用评测循环，直接复用，不必自己写。
+client_policy_dir: third_party/XPolicyLab/policy/ACT
