@@ -1,0 +1,84 @@
+# ACT + residual PPO online training (route B, stage 2).
+# Run from the startcode root: bash scripts/train_act_residual.sh
+# The script starts the Isaac image itself; policy GPU and env GPU must differ.
+
+bench_name: RoboDojo
+data_task: stack_blocks
+rollout_task: stack_blocks
+eval_task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+
+num_envs: 4
+env_host: 127.0.0.1
+env_port: 5555
+policy_gpu: 0
+env_gpu: 1
+env_timeout: 2400
+env_reset_timeout: 10800
+
+# "latest" scans outputs/act/<run name>/*/policy_offline.ckpt.
+offline_checkpoint: latest
+
+# Offline architecture (used only if the checkpoint lacks it).
+state_dim: 16
+action_dim: 16
+chunk_size: 16
+image_size: 96
+latent_dim: 32
+d_model: 256
+nhead: 4
+dim_feedforward: 512
+decoder_layers: 2
+dropout: 0.1
+
+# PPO budget.  finetune_episodes must be a multiple of num_envs.
+finetune_updates: 200
+finetune_episodes: 4
+rollout_max_steps: 550
+
+# Residual head: bounded real-unit correction on top of the frozen ACT action.
+residual_hidden_dim: 256
+residual_initial_std: 0.3
+std_min: 0.05
+std_max: 0.5
+# 16 values in action order: left xyz/quat/gripper, right xyz/quat/gripper.
+residual_scales:
+  - 0.02
+  - 0.02
+  - 0.02
+  - 0.005
+  - 0.005
+  - 0.005
+  - 0.005
+  - 0.05
+  - 0.02
+  - 0.02
+  - 0.02
+  - 0.005
+  - 0.005
+  - 0.005
+  - 0.005
+  - 0.05
+
+# PPO.
+gamma: 0.99
+gae_lambda: 0.95
+clip_ratio: 0.2
+ppo_epochs: 4
+minibatch_size: 64
+learning_rate: 0.0003
+weight_decay: 0.0001
+value_coef: 0.5
+entropy_coef: 0.001
+max_grad_norm: 0.5
+
+# External score (0/15/100) is logged raw; scaling only keeps values small.
+reward_scale: 0.01
+intrinsic_weight: 0.0
+
+# The residual is re-evaluated at every step, so evaluation must use chunk 1.
+eval_chunk_size: 1
+checkpoint_every: 10
+device: cuda

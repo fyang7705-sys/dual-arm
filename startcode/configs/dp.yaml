@@ -1,0 +1,49 @@
+# Diffusion Policy offline behavior cloning (route A, stage 1).
+# Run from the startcode root: bash scripts/train_dp.sh
+
+bench_name: RoboDojo
+data_task: stack_blocks
+rollout_task: stack_blocks
+eval_task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+
+# Data location relative to startcode.  Download with
+# `bash scripts/download_stack_blocks.sh`.
+data_path: data/RoboDojo/stack_blocks/arx_x5
+max_episodes: 0          # 0 = use every episode
+val_ratio: 0.1
+
+# Observation / action layout (must stay 16-D ee).
+state_dim: 16
+action_dim: 16
+chunk_size: 8            # future actions predicted per observation
+image_size: 96           # cam_head is resized to 96x96
+
+# Diffusion model.
+diffusion_steps: 100
+beta_start: 0.0001
+beta_end: 0.02
+hidden_dim: 512
+context_dim: 256
+vision_dim: 128
+time_dim: 128
+
+# Optimization.
+device: cuda
+amp: true
+epochs: 200
+batch_size: 64
+learning_rate: 0.0001
+weight_decay: 0.0001
+warmup_steps: 500
+grad_clip: 1.0
+ema_decay: 0.999
+num_workers: 2
+log_every: 20
+save_every: 25
+
+# Inference defaults stored in the checkpoint.
+eval_sample_steps: 10
+eval_chunk_size: 8

@@ -1,0 +1,69 @@
+# Diffusion Policy + DPPO online fine-tuning (route A, stage 2).
+# Run from the startcode root: bash scripts/train_dppo.sh
+# The script starts the Isaac image itself; policy GPU and env GPU must differ.
+
+bench_name: RoboDojo
+data_task: stack_blocks
+rollout_task: stack_blocks
+eval_task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+
+# Online environment served by scripts/run_online_env.sh.
+num_envs: 4
+env_host: 127.0.0.1
+env_port: 5555
+policy_gpu: 0
+env_gpu: 1
+env_timeout: 2400
+env_reset_timeout: 10800
+
+# Which offline checkpoint to continue from: "latest" scans
+# outputs/dp/<run name>/*/checkpoints/, or give an explicit path.
+offline_checkpoint: latest
+
+# Architecture (only used if the checkpoint is missing; the checkpoint wins).
+state_dim: 16
+action_dim: 16
+chunk_size: 8
+image_size: 96
+diffusion_steps: 100
+beta_start: 0.0001
+beta_end: 0.02
+hidden_dim: 512
+context_dim: 256
+vision_dim: 128
+time_dim: 128
+
+# DPPO rollout budget.  finetune_episodes must be a multiple of num_envs.
+# Each environment step executes the first action of the sampled chunk.
+finetune_updates: 200
+finetune_episodes: 4
+rollout_max_steps: 550
+sampler_steps: 8          # DDIM transitions per action
+stochastic_steps: 4       # last N transitions are Gaussian PPO actions
+eta: 0.8                  # noise injected into those transitions
+std_min: 0.02
+std_max: 0.4
+
+# PPO.
+gamma: 0.99
+gae_lambda: 0.95
+gamma_diff: 0.9           # discount along the denoising chain
+clip_ratio: 0.2
+ppo_epochs: 4
+minibatch_size: 64
+learning_rate: 0.00005
+weight_decay: 0.0001
+value_coef: 0.5
+max_grad_norm: 0.5
+ema_decay: 0.999
+
+# Reward handling: the external score (0/15/100) is untouched and logged raw;
+# reward_scale only keeps the value function in a small numeric range.
+reward_scale: 0.01
+intrinsic_weight: 0.0     # >0 adds a training-only reaching-progress bonus
+
+checkpoint_every: 10
+device: cuda

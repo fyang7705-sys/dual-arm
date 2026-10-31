@@ -19,7 +19,7 @@ class _Buffer:
         self._buffer = b""
 
 
-def serve(env, host: str, port: int, once: bool = False, include_privileged: bool = False) -> None:
+def serve(env, host: str, port: int, once: bool = False) -> None:
     """Serve batched ``reset`` / ``step`` until the client closes.
 
     One message steps every active scene. ``once`` exits after the first wave
@@ -50,7 +50,7 @@ def serve(env, host: str, port: int, once: bool = False, include_privileged: boo
                 if seeds is None:
                     seeds = [message.get("seed")]
                 observations, infos = env.reset_batch(seeds)
-                privileged = env.privileged_batch(list(range(width))) if include_privileged else [{} for _ in range(width)]
+                privileged = env.privileged_batch(list(range(width)))
                 _write(
                     connection,
                     {
@@ -63,7 +63,7 @@ def serve(env, host: str, port: int, once: bool = False, include_privileged: boo
             elif op == "step":
                 active = [int(index) for index in message["active"]]
                 results = env.step_batch(message["actions"], active)
-                privileged = env.privileged_batch(active) if include_privileged else [{} for _ in active]
+                privileged = env.privileged_batch(active)
                 terminated = [bool(item[2]) for item in results]
                 truncated = [bool(item[3]) for item in results]
                 _write(
@@ -71,7 +71,7 @@ def serve(env, host: str, port: int, once: bool = False, include_privileged: boo
                     {
                         "observations": [_pack_observation(item[0]) for item in results],
                         "privileged": [_pack(item) for item in privileged],
-                        "rewards": [float(item[1]) for item in results],
+                        "scores": [float(item[1]) for item in results],
                         "terminated": terminated,
                         "truncated": truncated,
                         "infos": [_pack(item[4]) for item in results],
@@ -85,12 +85,6 @@ def serve(env, host: str, port: int, once: bool = False, include_privileged: boo
                 break
             else:
                 _write(connection, {"error": f"unknown op {op}"})
-    except Exception as exc:
-        try:
-            _write(connection, {"error": f"{type(exc).__name__}: {exc}"})
-        except OSError:
-            pass
-        raise
     finally:
         connection.close()
         listener.close()
@@ -138,7 +132,7 @@ class RemoteEnv:
                     {"op": "reset", "seeds": [None if seed is None else int(seed) for seed in seeds]},
                     timeout=remaining,
                 )
-            except TimeoutError as exc:
+            except (TimeoutError, socket.timeout) as exc:
                 self.close()
                 raise ConnectionError(
                     f"Isaac env server did not complete reset within {self.reset_timeout:.0f}s"
@@ -160,12 +154,12 @@ class RemoteEnv:
             }
         )
         results = []
-        infos = reply.get("infos") or [{} for _ in reply["rewards"]]
+        infos = reply.get("infos") or [{} for _ in reply["scores"]]
         for index, observation in enumerate(reply["observations"]):
             results.append(
                 (
                     _unpack_observation(observation),
-                    float(reply["rewards"][index]),
+                    float(reply["scores"][index]),
                     bool(reply["terminated"][index]),
                     bool(reply["truncated"][index]),
                     infos[index],

@@ -1,7 +1,7 @@
 """In-process adapter around a RoboDojo stack-blocks task.
 
-The adapter does not edit the task reward. ``step`` returns the binary reward;
-``info.external_score`` preserves benchmark points. Block poses are available only
+The adapter does not edit the task reward. ``step`` returns the score produced
+by ``reward_manager.get_score`` (0, 15, or 100). Block poses are available only
 through ``get_privileged_state``.
 """
 
@@ -14,6 +14,7 @@ from starter.interfaces import (
     BLOCK_LABELS,
     HEAD_CAMERA,
     POLICY_STATE_KEYS,
+    SUCCESS_SCORE,
     STEP_LIMIT,
     assert_no_privileged,
     pack_ee_action,
@@ -127,26 +128,17 @@ class StackBlocksAdapter:
         self._take_action(action_dict)
         self._steps += 1
         raw = self._raw_obs()
-        score, success_reward = self._external_signals(final_check=self._steps >= self.step_limit)
-        success = float(success_reward) >= 1.0 - 1e-3
-        invalid = self._invalid()
-        terminated = success or invalid
+        score, success_reward = self._external_signals()
+        terminated = float(score) == SUCCESS_SCORE or float(success_reward) >= 1.0 - 1e-3
         truncated = self._steps >= self.step_limit and not terminated
         info = {
-            "success": success,
+            "success": terminated,
             "external_score": float(score),
             "success_reward": float(success_reward),
-            "termination_reason": "invalid" if invalid else _reason(success, truncated),
+            "termination_reason": _reason(terminated, truncated),
             "step_id": self._steps,
         }
-        return self.policy_observation(raw), float(success_reward), terminated, truncated, info
-
-    def _invalid(self):
-        flags = getattr(self.task, "online_invalid_flags", [])
-        failed_ik = bool(flags[self.env_index]) if len(flags) > self.env_index else False
-        success_flags = getattr(self.task, "success", None)
-        failed_check = success_flags is not None and not bool(success_flags[self.env_index])
-        return failed_ik or failed_check
+        return self.policy_observation(raw), float(score), terminated, truncated, info
 
     def get_privileged_state(self) -> dict:
         """Block poses for intrinsic rewards. This dict is not a policy input."""
@@ -200,9 +192,9 @@ class StackBlocksAdapter:
         if hasattr(self.task, "get_score"):
             self.task.get_score()
 
-    def _external_signals(self, final_check=False) -> tuple[float, float]:
+    def _external_signals(self) -> tuple[float, float]:
         manager = self.task.reward_manager
-        reward_list = manager.get_reward(final_check=final_check)
+        reward_list = manager.get_reward(final_check=False)
         score_list = manager.get_score(reward_lst=reward_list)
         return float(score_list[self.env_index]), float(reward_list[self.env_index])
 
@@ -241,10 +233,10 @@ class ParallelAdapter:
         _seed_gripper_state(self.task)
         observations = []
         infos = []
-        self._slots[0]._arm_reward_checks()
         for index, seed in enumerate(seeds):
             slot = self._slots[index]
             slot._steps = 0
+            slot._arm_reward_checks()
             observations.append(slot.policy_observation(self._raw(index)))
             infos.append({"env_name": type(self.task).__name__, "seed": seed, "env_index": index})
         return observations, infos
@@ -265,20 +257,18 @@ class ParallelAdapter:
         for raw, index in zip(raws, active):
             slot = self._slots[index]
             slot._steps += 1
-            score, success_reward = slot._external_signals(final_check=slot._steps >= slot.step_limit)
-            success = float(success_reward) >= 1.0 - 1e-3
-            invalid = slot._invalid()
-            terminated = success or invalid
+            score, success_reward = slot._external_signals()
+            terminated = float(score) == SUCCESS_SCORE or float(success_reward) >= 1.0 - 1e-3
             truncated = slot._steps >= slot.step_limit and not terminated
             info = {
-                "success": success,
+                "success": terminated,
                 "external_score": float(score),
                 "success_reward": float(success_reward),
-                "termination_reason": "invalid" if invalid else _reason(success, truncated),
+                "termination_reason": _reason(terminated, truncated),
                 "step_id": slot._steps,
                 "env_index": index,
             }
-            results.append((slot.policy_observation(raw), float(success_reward), terminated, truncated, info))
+            results.append((slot.policy_observation(raw), float(score), terminated, truncated, info))
         return results
 
     def privileged_batch(self, active) -> list[dict]:

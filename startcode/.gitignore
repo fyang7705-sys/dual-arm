@@ -7,8 +7,8 @@ third_party/XPolicyLab/
 third_party/data
 third_party/env_cfg
 .pytest_cache/
+.cache/
 *.tar
 *.ckpt
 *.pt
 *.pkl
-.cache/
