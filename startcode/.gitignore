@@ -1,8 +1,8 @@
 __pycache__/
 *.pyc
 /data/
-/outputs/
-third_party/RoboDojo/
+# /outputs/
+third_party/RoboDojo/*
 third_party/XPolicyLab/
 third_party/data
 third_party/env_cfg
@@ -12,3 +12,5 @@ third_party/env_cfg
 *.pt
 *.pkl
 .cache/
+
+!third_party/RoboDojo/eval_result/
