@@ -17,8 +17,8 @@ from starter.config import require
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUTS_ROOT = REPO_ROOT / "outputs"
-STAMP_FORMAT = "%Y.%m.%d-%H.%M.%S"
-_STAMP = re.compile(r"^\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}$")
+STAMP_FORMAT = "%Y.%m.%d-%H.%M.%S.%f"
+_STAMP = re.compile(r"^\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}(?:\.\d{6})?$")
 
 
 def run_name(config: dict) -> str:

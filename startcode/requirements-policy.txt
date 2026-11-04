@@ -1,12 +1,12 @@
-# Install the PyTorch wheel matching the server's CUDA separately (see docs).
-torch>=2.5,<3
-numpy>=1.26,<3
-h5py>=3.10,<4
-opencv-python-headless>=4.10,<5
+# Install the PyTorch wheel matching the server CUDA separately.
+torch>=2.1,<3
+numpy>=1.23,<3
+h5py>=3.8,<4
+opencv-python-headless>=4.8,<5
+Pillow>=10
 PyYAML>=6,<7
 websockets>=14,<16
 msgpack>=1,<2
-msgpack-numpy>=0.4.8,<1
 pydantic>=2,<3
 pytest>=8,<9
 huggingface-hub>=0.34,<2

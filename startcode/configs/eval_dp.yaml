@@ -1,0 +1,17 @@
+# Evaluate the offline Diffusion Policy checkpoint.
+# Usage: bash scripts/eval_policy.sh configs/eval_dp.yaml
+
+task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+eval_num: native
+policy_gpu: 0
+env_gpu: 1
+
+# Conda environment with torch / XPolicyLab dependencies.
+policy_env: dp
+# Name must match policies/<name> so RoboDojo can find deploy.py.
+policy_dir: policies/diffusion
+# latest_offline / latest_online / an explicit .ckpt path.
+ckpt: latest_offline

@@ -144,7 +144,7 @@ if [[ ! -f "${POLICY_DIR}/setup_eval_policy_server.sh" ]]; then
   echo "[eval_host] missing ${POLICY_DIR}/setup_eval_policy_server.sh" >&2
   exit 1
 fi
-if [[ ! -e "/dev/nvidia${ENV_GPU}" ]]; then
+if [[ "${DRY_RUN}" != "1" && ! -e "/dev/nvidia${ENV_GPU}" ]]; then
   echo "[eval_host] host has no /dev/nvidia${ENV_GPU}." >&2
   exit 1
 fi
@@ -180,6 +180,7 @@ export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
 # from another checkout and breaks on the warp version Isaac Sim ships.
 CLIENT_PYTHONPATH="${ROBODOJO_ROOT}/third_party/curobo:${ROOT}/third_party:${ROOT}/third_party/XPolicyLab:${ROBODOJO_ROOT}:${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export ROBODOJO_RUN_ID="${ROBODOJO_RUN_ID:-$(date +%Y-%m-%d_%H-%M-%S)}"
+export POLICY_MANIFEST_DIR="${ROOT}/outputs/eval/${ROBODOJO_RUN_ID}"
 
 if [[ -z "${PORT}" ]]; then
   PORT="$(python3 - <<'PY'
@@ -302,16 +303,21 @@ fi
 
 activate_env "${SIM_ENV}"
 echo "[eval_host] running the Isaac client on host GPU ${ENV_GPU}..."
-PYTHONPATH="${CLIENT_PYTHONPATH}" "${CLIENT_CMD[@]}"
-client_rc=$?
+client_rc=0
+PYTHONPATH="${CLIENT_PYTHONPATH}" "${CLIENT_CMD[@]}" || client_rc=$?
 
 # RoboDojo nests results as eval_result/<bench>/<task>/<policy>/<env_cfg>/...
 # keyed by the run id, so locate the directory instead of assuming a depth.
-RESULT_DIR="$(find "${ROBODOJO_ROOT}/eval_result" -type d -name "${ROBODOJO_RUN_ID}" 2>/dev/null | head -n 1)"
+RESULT_DIR="$(find "${ROBODOJO_ROOT}/eval_result" -type d -name "${ROBODOJO_RUN_ID}" -print -quit 2>/dev/null || true)"
 echo "[eval_host] client exit code: ${client_rc}"
 if [[ -n "${RESULT_DIR}" && -d "${RESULT_DIR}" ]]; then
+  if [[ -d "${POLICY_MANIFEST_DIR}" ]]; then
+    for metadata in "${POLICY_MANIFEST_DIR}"/*_checkpoint.json; do
+      if [[ -f "${metadata}" ]]; then cp "${metadata}" "${RESULT_DIR}/"; fi
+    done
+  fi
   echo "[eval_host] results: ${RESULT_DIR}"
-  find "${RESULT_DIR}" -maxdepth 1 \( -name '*.json' -o -name '*.mp4' \) | sort | head -20
+  find "${RESULT_DIR}" -maxdepth 1 \( -name '*.json' -o -name '*.mp4' \) | sort | sed -n '1,20p'
 else
   echo "[eval_host] no result directory named ${ROBODOJO_RUN_ID} under ${ROBODOJO_ROOT}/eval_result" >&2
 fi

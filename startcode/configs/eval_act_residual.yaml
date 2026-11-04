@@ -1,0 +1,14 @@
+# Evaluate the ACT + residual PPO checkpoint (compare against eval_act.yaml).
+# Usage: bash scripts/eval_policy.sh configs/eval_act_residual.yaml
+
+task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+eval_num: native
+policy_gpu: 0
+env_gpu: 1
+
+policy_env: act
+policy_dir: policies/act
+ckpt: latest_residual

@@ -62,6 +62,7 @@ fi
 
 RUN_ID="$(date +%Y-%m-%d_%H-%M-%S)"
 export ROBODOJO_RUN_ID="${RUN_ID}"
+export POLICY_MANIFEST_DIR="${ROOT}/outputs/eval/${RUN_ID}"
 ICD_PATH="${ROOT}/outputs/eval/nvidia_icd.json"
 mkdir -p "${ROOT}/outputs/eval"
 cat > "${ICD_PATH}" <<'EOF'
@@ -134,6 +135,7 @@ done
 shopt -u nullglob
 
 docker rm -f stack-blocks-eval >/dev/null 2>&1 || true
+client_rc=0
 docker run --rm --name stack-blocks-eval \
   --device "/dev/nvidia${ENV_GPU}" \
   --device /dev/nvidiactl \
@@ -162,9 +164,16 @@ docker run --rm --name stack-blocks-eval \
     --task "${TASK}" \
     --policy-host 127.0.0.1 \
     --policy-port "${PORT}" \
-    --ckpt "${CKPT_NAME}" \
+    --ckpt "$(basename "${CKPT_NAME}")" \
     --env-cfg "${ENV_CFG}" \
     --action-type "${ACTION_TYPE}" \
     --seed "${SEED}" \
     --env-gpu 0 \
-    --eval-num "${EVAL_NUM}"
+    --eval-num "${EVAL_NUM}" || client_rc=$?
+RESULT_DIR="$(find "${ROBODOJO_ROOT}/eval_result" -type d -name "${RUN_ID}" -print -quit 2>/dev/null || true)"
+if [[ -n "${RESULT_DIR}" && -d "${POLICY_MANIFEST_DIR}" ]]; then
+  for metadata in "${POLICY_MANIFEST_DIR}"/*_checkpoint.json; do
+    if [[ -f "${metadata}" ]]; then cp "${metadata}" "${RESULT_DIR}/"; fi
+  done
+fi
+exit "${client_rc}"

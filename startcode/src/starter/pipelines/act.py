@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
-from starter.cli import main as run
+import argparse
+
+from starter.config import load_config
+from starter.policies.act import train_offline, train_online
 
 
 def main(argv: list[str] | None = None) -> None:
-    run("act", argv)
+    parser = argparse.ArgumentParser(description="ACT pipeline framework.")
+    parser.add_argument("stage", choices=("offline", "online"))
+    parser.add_argument("--config", default="configs/env.yaml")
+    args = parser.parse_args(argv)
+    config = load_config(args.config)
+    if args.stage == "offline":
+        train_offline(config)
+    else:
+        train_online(config)
 
 
 if __name__ == "__main__":

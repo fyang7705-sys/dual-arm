@@ -1,0 +1,14 @@
+# Evaluate the DPPO online checkpoint (compare against eval_dp.yaml).
+# Usage: bash scripts/eval_policy.sh configs/eval_dppo.yaml
+
+task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+eval_num: native
+policy_gpu: 0
+env_gpu: 1
+
+policy_env: dp
+policy_dir: policies/diffusion
+ckpt: latest_online
