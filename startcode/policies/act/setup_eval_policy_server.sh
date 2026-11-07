@@ -21,7 +21,9 @@ PORT="$9"
 HOST="${10:-127.0.0.1}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-export PYTHONPATH="${ROOT}/src:${ROOT}:${PYTHONPATH:-}"
+# websockets>=14 lives outside the Isaac env (isaacsim pins 12.0); the policy
+# server needs websockets.asyncio, so put it first on the import path.
+export PYTHONPATH="${XPL_WS_PATH:-${HOME}/.local/xpl_ws}:${ROOT}/src:${ROOT}:${PYTHONPATH:-}"
 export STACK_BLOCKS_ROOT="${ROOT}"
 export CUDA_VISIBLE_DEVICES="${POLICY_GPU}"
 export TOKENIZERS_PARALLELISM=false
