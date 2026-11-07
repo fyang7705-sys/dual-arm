@@ -1,6 +1,6 @@
 """Compact ACT-CVAE, conditional diffusion, residual actor and visual critic.
 
-    Independently implemented task baselines; no pretrained backbone downloads.
+    ACT uses a pretrained ResNet18 on fresh offline runs.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from torch import nn
 from torch.distributions import Normal
 
 from starter.interfaces import ACTION_DIM
+from starter.policies.act_model import ACT
 
 
 class Vision(nn.Module):
@@ -33,43 +34,6 @@ class Condition(nn.Module):
 
     def forward(self, image, state):
         return torch.cat((self.vision(image), self.proprio(state).unsqueeze(1)), dim=1)
-
-
-class ACT(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        w, h, z = int(config["width"]), int(config["chunk"]), int(config["latent_dim"])
-        heads, layers = int(config["heads"]), int(config["layers"])
-        self.chunk, self.latent_dim = h, z
-        self.condition = Condition(w)
-        enc = nn.TransformerEncoderLayer(w, heads, 4 * w, dropout=0, batch_first=True)
-        self.posterior = nn.TransformerEncoder(enc, layers, enable_nested_tensor=False)
-        self.action_embed = nn.Linear(ACTION_DIM, w)
-        self.cls = nn.Parameter(torch.zeros(1, 1, w))
-        self.posterior_pos = nn.Parameter(torch.randn(1, h + 2, w) * 0.02)
-        self.posterior_out = nn.Linear(w, z * 2)
-        self.latent_embed = nn.Linear(z, w)
-        self.queries = nn.Parameter(torch.randn(1, h, w) * 0.02)
-        dec = nn.TransformerDecoderLayer(w, heads, 4 * w, dropout=0, batch_first=True)
-        self.decoder = nn.TransformerDecoder(dec, layers)
-        self.output = nn.Linear(w, ACTION_DIM)
-
-    def forward(self, image, state, actions=None, valid=None):
-        batch = len(state)
-        memory = self.condition(image, state)
-        kl = state.new_zeros(())
-        latent = state.new_zeros(batch, self.latent_dim)
-        if actions is not None:
-            tokens = torch.cat((self.cls.expand(batch, -1, -1), memory[:, -1:], self.action_embed(actions)), 1)
-            padding = torch.cat((torch.zeros(batch, 2, device=state.device, dtype=torch.bool), ~valid), 1)
-            encoded = self.posterior(tokens + self.posterior_pos, src_key_padding_mask=padding)[:, 0]
-            mu, logvar = self.posterior_out(encoded).chunk(2, -1)
-            logvar = logvar.clamp(-10, 10)
-            latent = mu + (0.5 * logvar).exp() * torch.randn_like(mu)
-            kl = (-0.5 * (1 + logvar - mu.square() - logvar.exp())).sum(-1).mean()
-        memory = torch.cat((memory, self.latent_embed(latent).unsqueeze(1)), 1)
-        prediction = self.output(self.decoder(self.queries.expand(batch, -1, -1), memory))
-        return prediction, kl
 
 
 class Denoiser(nn.Module):

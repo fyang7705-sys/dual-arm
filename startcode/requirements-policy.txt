@@ -1,5 +1,7 @@
 # Install the PyTorch wheel matching the server's CUDA separately (see docs).
 torch>=2.5,<3
+# Install a torchvision build matching the selected torch wheel.
+torchvision>=0.20,<1
 numpy>=1.26,<3
 h5py>=3.10,<4
 opencv-python-headless>=4.10,<5

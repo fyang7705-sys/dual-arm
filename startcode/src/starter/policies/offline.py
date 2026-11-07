@@ -34,7 +34,15 @@ def train(kind, config):
     loaders = [DataLoader(dataset, batch_size=batch_size, shuffle=(index == 0), num_workers=workers,
                           pin_memory=device.type == "cuda") for index, dataset in enumerate(datasets)]
     model = build_model(kind, cfg).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=float(config.get("learning_rate", 1e-4)),
+    if kind == "act" and resume is None and config.get("pretrained_backbone", True):
+        model.initialize_pretrained_backbone()
+    parameters = model.parameters()
+    if kind == "act":
+        parameters = [
+            {"params": model.backbone.parameters(), "lr": float(config.get("backbone_lr", 1e-5))},
+            {"params": [p for name, p in model.named_parameters() if not name.startswith("backbone.")]},
+        ]
+    optimizer = torch.optim.AdamW(parameters, lr=float(config.get("learning_rate", 1e-4)),
                                   weight_decay=float(config.get("weight_decay", 1e-4)))
     ema = copy.deepcopy(model).eval() if kind == "diffusion" else None
     start, best = 0, float("inf")

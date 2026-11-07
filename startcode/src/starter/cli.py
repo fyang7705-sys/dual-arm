@@ -10,7 +10,7 @@ from starter.config import load_config, parse_simple_yaml
 def arguments(kind, argv=None):
     parser = argparse.ArgumentParser(description=f"{kind}: offline cloning or online PPO")
     parser.add_argument("stage", choices=("offline", "online"))
-    parser.add_argument("--config", default="configs/env.yaml")
+    parser.add_argument("--config", default="configs/act.yaml" if kind == "act" else "configs/env.yaml")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     args = parser.parse_args(argv)
     config = load_config(args.config)

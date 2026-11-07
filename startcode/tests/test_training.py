@@ -42,7 +42,7 @@ def config(tmp_path):
                     group.create_dataset(key + "s", data=values)
             f.create_dataset("vision/cam_head/colors", data=np.full((4, 16, 16, 3), 40 + episode, np.uint8))
     return {"data_path": str(data.parent), "output_root": str(tmp_path / "outputs"),
-            "seed": 3, "width": 16, "heads": 2, "layers": 1, "chunk": 2, "latent_dim": 4,
+            "pretrained_backbone": False, "seed": 3, "width": 16, "heads": 2, "layers": 1, "chunk": 2, "latent_dim": 4,
             "execute_steps": 2, "image_size": 16, "diffusion_steps": 4, "epochs": 2,
             "batch_size": 2, "workers": 0, "device": "cpu", "save_every": 1,
             "env_backend": "fake", "num_envs": 2, "finetune_episodes": 2, "finetune_updates": 1,

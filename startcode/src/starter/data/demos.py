@@ -68,7 +68,10 @@ def decode_rgb(frame):
 def resize_rgb(frame, size):
     import cv2
     rgb = decode_rgb(frame)
-    return cv2.resize(rgb, (size, size), interpolation=cv2.INTER_AREA)
+    shape = (int(size), int(size)) if isinstance(size, int) else tuple(map(int, size))
+    if len(shape) != 2 or min(shape) < 16:
+        raise ValueError("image_size must be an integer or [height, width], each >=16")
+    return cv2.resize(rgb, (shape[1], shape[0]), interpolation=cv2.INTER_AREA)
 
 
 def split_episodes(config):
@@ -118,8 +121,9 @@ class ChunkDataset:
     stays inside its episode, and validation episodes never enter train stats.
     """
     def __init__(self, files, chunk, image_size, stats):
-        self.files, self.chunk, self.image_size, self.stats = list(files), int(chunk), int(image_size), stats
-        if self.chunk < 1 or self.image_size < 16:
+        self.files, self.chunk, self.image_size, self.stats = list(files), int(chunk), image_size, stats
+        shape = [image_size] if isinstance(image_size, int) else image_size
+        if self.chunk < 1 or not shape or min(shape) < 16:
             raise ValueError("chunk must be positive and image_size >=16")
         self.ends = []
         total = 0
