@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import random
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -51,7 +52,8 @@ def pick_device(config):
 
 def model_config(config):
     cfg = {"width": 128, "chunk": 10, "latent_dim": 32, "heads": 4, "layers": 2,
-           "diffusion_steps": 20, "image_size": 96, "execute_steps": 4}
+           "diffusion_steps": 100, "inference_steps": 100, "image_size": 96, "execute_steps": 4,
+           "n_obs_steps": 3, "down_dims": [256, 512, 1024], "diffusion_step_embed_dim": 128}
     cfg.update({key: config[key] for key in cfg if key in config})
     if int(cfg["width"]) % int(cfg["heads"]) or int(cfg["width"]) % 2:
         raise ValueError("width must be even and divisible by heads")
@@ -127,6 +129,35 @@ def tensor_observations(images, states, device):
             torch.as_tensor(states, device=device).float())
 
 
+class ObservationHistory:
+    """Independent frame histories keyed by actual environment ID."""
+    def __init__(self, steps, stats, size):
+        self.steps, self.stats, self.size = steps, stats, size
+        self.frames = {}
+
+    def reset(self):
+        self.frames.clear()
+
+    def update(self, observations, indices=None):
+        images, states = observation_arrays(observations, self.stats, self.size)
+        keys = indices if indices is not None else [o.get("env_idx", i) for i, o in enumerate(observations)]
+        for key, image, state in zip(keys, images, states):
+            frame = (image.copy(), state.copy())
+            if key not in self.frames:
+                self.frames[key] = deque([frame] * self.steps, maxlen=self.steps)
+            else:
+                self.frames[key].append(frame)
+
+    def arrays(self, observations):
+        keys = [o.get("env_idx", i) for i, o in enumerate(observations)]
+        for key, observation in zip(keys, observations):
+            if key not in self.frames:
+                self.update([observation], [key])
+        images = np.stack([np.stack([f[0] for f in self.frames[key]]) for key in keys])
+        states = np.stack([np.stack([f[1] for f in self.frames[key]]) for key in keys])
+        return images, states
+
+
 def project_actions(actions, fallback=None):
     """Normalize wxyz quaternions and clamp grippers at the environment boundary.
 
@@ -157,6 +188,8 @@ class Policy:
         self.model = build_model(self.kind, self.config).to(self.device)
         self.model.load_state_dict(self.payload.get("ema") or self.payload["model"])
         self.model.eval()
+        self.history = (ObservationHistory(self.config["n_obs_steps"], self.stats, self.config["image_size"])
+                        if self.kind == "diffusion" else None)
         self.residual = None
         self.diffusion_base = None
         if self.payload.get("diffusion_base") is not None:
@@ -167,9 +200,22 @@ class Policy:
             self.residual.load_state_dict(self.payload["residual"])
             self.residual.eval()
 
+    def reset(self):
+        if self.history is not None:
+            self.history.reset()
+
+    def observe(self, observations):
+        if self.history is not None:
+            self.history.update(observations)
+
     @torch.no_grad()
-    def predict(self, observations):
-        arrays = observation_arrays(observations, self.stats, self.config["image_size"])
+    def predict(self, observations, update_history=True):
+        if self.history is not None:
+            if update_history:
+                self.observe(observations)
+            arrays = self.history.arrays(observations)
+        else:
+            arrays = observation_arrays(observations, self.stats, self.config["image_size"])
         image, state = tensor_observations(*arrays, self.device)
         if self.kind == "act":
             action = self.model(image, state)[0]
@@ -177,8 +223,10 @@ class Policy:
                 latent = self.residual.distribution(image, state, action).mean
                 action = action + float(self.payload["residual_scale"]) * latent.tanh()
         else:
-            action, _ = self.model.sample(image, state, prefix_model=self.diffusion_base,
-                                          finetune_steps=self.payload.get("finetune_denoising_steps"))
+            suffix = self.payload.get("finetune_denoising_steps", 0) if self.diffusion_base is not None else 0
+            action, _ = self.model.sample(image, state, stochastic_steps=suffix, prefix_model=self.diffusion_base,
+                                          finetune_steps=suffix,
+                                          min_std=float(self.payload.get("config", {}).get("denoising_min_std", .05)))
         mean = torch.as_tensor(self.stats["action_mean"], device=self.device)
         std = torch.as_tensor(self.stats["action_std"], device=self.device)
         decoded = (action * std + mean).cpu().numpy()

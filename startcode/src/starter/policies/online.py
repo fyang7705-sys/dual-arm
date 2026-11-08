@@ -12,7 +12,7 @@ from starter.envs.remote import RemoteEnv
 from starter.interfaces import ACTION_DIM
 from starter.policies.models import Critic, ResidualActor
 from starter.policies.runtime import (FORMAT, append_metrics, assert_same_state, build_model, clone_state,
-                                      load_payload, observation_arrays, pick_device, project_actions,
+                                      load_payload, observation_arrays, ObservationHistory, pick_device, project_actions,
                                       restore_rng, rng_state, run_directory, save_checkpoint,
                                       seed_everything, tensor_observations)
 
@@ -46,7 +46,8 @@ class Learner:
         self.device, self.cfg, self.stats = pick_device(config), dict(payload["model_config"]), payload["stats"]
         self.model = build_model(kind, self.cfg).to(self.device)
         self.model.load_state_dict(payload.get("ema") or payload["model"])
-        self.model.eval()  # dropout is zero; likelihood replay must match sampling
+        self.model.eval()  # no dropout or batch statistics in the actor
+        self.history = ObservationHistory(self.cfg["n_obs_steps"], self.stats, self.cfg["image_size"]) if kind == "diffusion" else None
         self.base_snapshot = None
         self.diffusion_base = None
         if kind == "act":
@@ -58,7 +59,7 @@ class Learner:
                 self.actor.load_state_dict(payload["residual"])
         else:
             self.actor = self.model
-            # The deterministic prefix must stay frozen while PPO optimizes
+            # The prefix must stay frozen while PPO optimizes
             # likelihoods only for the suffix transitions.
             self.diffusion_base = build_model(kind, self.cfg).to(self.device).eval()
             self.diffusion_base.load_state_dict(payload.get("diffusion_base") or payload.get("ema") or payload["model"])
@@ -66,8 +67,8 @@ class Learner:
         self.critic = Critic(int(self.cfg["width"])).to(self.device)
         self.scale = float(payload.get("residual_scale", config.get("residual_scale", 0.1)))
         self.stochastic_steps = int(payload.get("finetune_denoising_steps", config.get("finetune_denoising_steps", 4)))
-        if kind == "diffusion" and not 1 <= self.stochastic_steps <= self.model.steps:
-            raise ValueError("finetune_denoising_steps must be in [1, diffusion_steps]")
+        if kind == "diffusion" and not 1 <= self.stochastic_steps <= self.model.inference_steps:
+            raise ValueError("finetune_denoising_steps must be in [1, inference_steps]")
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=float(config.get("actor_lr", 1e-5)))
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=float(config.get("critic_lr", 1e-4)))
         if payload["stage"] == "online":
@@ -77,7 +78,8 @@ class Learner:
 
     @torch.no_grad()
     def sample(self, observations):
-        images, states = observation_arrays(observations, self.stats, self.cfg["image_size"])
+        images, states = (self.history.arrays(observations) if self.history is not None else
+                          observation_arrays(observations, self.stats, self.cfg["image_size"]))
         image, state = tensor_observations(images, states, self.device)
         values = self.critic(image, state).cpu().numpy()
         if self.kind == "act":
@@ -186,6 +188,11 @@ def collect(learner, env, config, update_index):
     for wave in range(episodes // width):
         seeds = [int(config.get("seed", 0)) + update_index * episodes + wave * width + i for i in range(width)]
         observations, _ = env.reset_batch(seeds)
+        for i, observation in enumerate(observations):
+            observation["env_idx"] = i
+        if learner.history is not None:
+            learner.history.reset()
+            learner.history.update(observations)
         active = list(range(width))
         per_env = [[] for _ in range(width)]
         raw_returns, successes = [0.0] * width, [False] * width
@@ -203,7 +210,10 @@ def collect(learner, env, config, update_index):
                 keep = []
                 for i, result in zip(running, results):
                     obs, reward, terminated, truncated, info = result
+                    obs["env_idx"] = i
                     observations[i] = obs
+                    if learner.history is not None:
+                        learner.history.update([obs])
                     item = pending[i]
                     # The environment provides the unchanged binary task reward.
                     item["reward"] += gamma ** item["duration"] * float(reward)
