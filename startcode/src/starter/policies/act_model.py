@@ -1,4 +1,4 @@
-"""Single-camera ACT: ResNet18, positional-attention Transformer and CVAE.
+"""Single-camera ACT: ResNet34, positional-attention Transformer and CVAE.
 
 Architecture follows https://github.com/tonyzhaozh/act, adapted to EE16.
 Positions enter attention queries/keys; values carry content only.
@@ -11,6 +11,8 @@ import torch
 from torch import nn
 
 from starter.interfaces import ACTION_DIM
+
+ATTENTION_DROPOUT = 0.1
 
 
 def sine_position(length, width, device):
@@ -35,7 +37,7 @@ def spatial_position(height, width, channels, device):
 class EncoderLayer(nn.Module):
     def __init__(self, width, heads):
         super().__init__()
-        self.attention = nn.MultiheadAttention(width, heads, dropout=0, batch_first=True)
+        self.attention = nn.MultiheadAttention(width, heads, dropout=ATTENTION_DROPOUT, batch_first=True)
         self.ff = nn.Sequential(nn.Linear(width, 4 * width), nn.ReLU(), nn.Linear(4 * width, width))
         self.norm1, self.norm2 = nn.LayerNorm(width), nn.LayerNorm(width)
 
@@ -49,8 +51,8 @@ class EncoderLayer(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, width, heads):
         super().__init__()
-        self.self_attention = nn.MultiheadAttention(width, heads, dropout=0, batch_first=True)
-        self.cross_attention = nn.MultiheadAttention(width, heads, dropout=0, batch_first=True)
+        self.self_attention = nn.MultiheadAttention(width, heads, dropout=ATTENTION_DROPOUT, batch_first=True)
+        self.cross_attention = nn.MultiheadAttention(width, heads, dropout=ATTENTION_DROPOUT, batch_first=True)
         self.ff = nn.Sequential(nn.Linear(width, 4 * width), nn.ReLU(), nn.Linear(4 * width, width))
         self.norm1, self.norm2, self.norm3 = (nn.LayerNorm(width) for _ in range(3))
 
@@ -66,14 +68,14 @@ class DecoderLayer(nn.Module):
 class ACT(nn.Module):
     def __init__(self, config):
         super().__init__()
-        from torchvision.models import resnet18
+        from torchvision.models import resnet34
         from torchvision.ops.misc import FrozenBatchNorm2d
 
         width, heads, layers = (int(config[key]) for key in ("width", "heads", "layers"))
         if width % 4:
             raise ValueError("ACT width must be divisible by 4 for 2-D position encoding")
         self.chunk, self.latent_dim = int(config["chunk"]), int(config["latent_dim"])
-        backbone = resnet18(weights=None, norm_layer=FrozenBatchNorm2d)
+        backbone = resnet34(weights=None, norm_layer=FrozenBatchNorm2d)
         self.backbone = nn.Sequential(*list(backbone.children())[:-2])
         self.image_projection = nn.Conv2d(512, width, 1)
         self.register_buffer("image_mean", torch.tensor([.485, .456, .406]).view(1, 3, 1, 1))
@@ -94,9 +96,9 @@ class ACT(nn.Module):
 
     def initialize_pretrained_backbone(self):
         # Only fresh offline training calls this. Loading checkpoints is offline-safe.
-        from torchvision.models import ResNet18_Weights, resnet18
+        from torchvision.models import ResNet34_Weights, resnet34
         from torchvision.ops.misc import FrozenBatchNorm2d
-        source = resnet18(weights=ResNet18_Weights.DEFAULT, norm_layer=FrozenBatchNorm2d)
+        source = resnet34(weights=ResNet34_Weights.DEFAULT, norm_layer=FrozenBatchNorm2d)
         self.backbone.load_state_dict(nn.Sequential(*list(source.children())[:-2]).state_dict())
 
     def forward(self, image, state, actions=None, valid=None):

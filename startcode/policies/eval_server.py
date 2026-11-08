@@ -56,6 +56,10 @@ def resolve_checkpoint(kind: str, value: str) -> Path:
     """Accept a path, ``latest``, or a run name under ``outputs/<kind>``."""
 
     candidate = Path(value).expanduser()
+    # The server is launched after `cd` into the policy directory, so resolve
+    # repo-relative paths against the repository root instead of the CWD.
+    if not candidate.is_absolute():
+        candidate = REPO_ROOT / candidate
     if candidate.is_file():
         return candidate
     if candidate.is_dir() and (candidate / "policy_last.ckpt").is_file():

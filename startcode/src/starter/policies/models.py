@@ -1,6 +1,6 @@
 """Compact ACT-CVAE, conditional diffusion, residual actor and visual critic.
 
-    ACT uses a pretrained ResNet18 on fresh offline runs.
+    ACT uses a pretrained ResNet34 on fresh offline runs.
 """
 from __future__ import annotations
 
