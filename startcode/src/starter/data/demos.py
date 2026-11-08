@@ -9,7 +9,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from starter.interfaces import ACTION_DIM, ARM_KEYS, ARM_WIDTHS
+from starter.interfaces import ACTION_DIM, ARM_KEYS, ARM_WIDTHS, EE_POSE_DIM
 from starter.paths import REPO_ROOT
 
 
@@ -31,12 +31,22 @@ def _columns(group):
     return [group[key if key in group else key + "s"] for key in ARM_KEYS]
 
 
+def canonicalize_quaternion(value):
+    """Flip q -> -q so w >= 0; removes the SO(3) double cover from pose vectors."""
+    result = value.copy()
+    quaternion = result[..., 3:7]
+    result[..., 3:7] = np.where(quaternion[..., :1] < 0, -quaternion, quaternion)
+    return result
+
+
 def _pack_group(group, selection=slice(None)):
     parts = []
     for column, width in zip(_columns(group), ARM_WIDTHS):
         value = np.asarray(column[selection], dtype=np.float32)
         if value.shape[-1] != width:
             raise ValueError(f"{column.name}: expected last dimension {width}, got {value.shape}")
+        if width == EE_POSE_DIM:
+            value = canonicalize_quaternion(value)
         parts.append(value)
     result = np.concatenate(parts, axis=-1)
     if not np.isfinite(result).all():
@@ -72,6 +82,26 @@ def resize_rgb(frame, size):
     if len(shape) != 2 or min(shape) < 16:
         raise ValueError("image_size must be an integer or [height, width], each >=16")
     return cv2.resize(rgb, (shape[1], shape[0]), interpolation=cv2.INTER_AREA)
+
+
+def augmentation_parameters():
+    """One photometric jitter shared by all frames of a sample."""
+    return (np.random.uniform(0.75, 1.25), np.random.uniform(-32, 32),
+            np.random.uniform(0.75, 1.25), np.random.random() < 0.1)
+
+
+def augment_rgb(frame, parameters=None):
+    """Photometric jitter only: absolute-pose labels forbid spatial crops and flips."""
+    gain, offset, saturation, blur = parameters if parameters is not None else augmentation_parameters()
+    image = frame.astype(np.float32)
+    image = image * gain + offset
+    gray = image @ np.array([0.299, 0.587, 0.114], np.float32)
+    image = gray[..., None] + (image - gray[..., None]) * saturation
+    image = image.clip(0, 255)
+    if blur:
+        import cv2
+        image = cv2.GaussianBlur(image, (3, 3), 0)
+    return image.astype(np.uint8)
 
 
 def split_episodes(config):
@@ -120,11 +150,17 @@ class ChunkDataset:
     No persistent h5py handles cross DataLoader worker/fork boundaries. Padding
     stays inside its episode, and validation episodes never enter train stats.
     """
-    def __init__(self, files, chunk, image_size, stats):
+    def __init__(self, files, chunk, image_size, stats, augment=False, obs_steps=1, frame_dropout=0.0):
         self.files, self.chunk, self.image_size, self.stats = list(files), int(chunk), image_size, stats
+        self.augment = bool(augment)
+        self.obs_steps, self.frame_dropout = int(obs_steps), float(frame_dropout)
         shape = [image_size] if isinstance(image_size, int) else image_size
         if self.chunk < 1 or not shape or min(shape) < 16:
             raise ValueError("chunk must be positive and image_size >=16")
+        if self.obs_steps < 1 or not 0 <= self.frame_dropout <= 1:
+            raise ValueError("obs_steps must be positive and frame_dropout in [0, 1]")
+        if self.frame_dropout > 0 and self.obs_steps == 1:
+            raise ValueError("frame_dropout requires obs_steps > 1")
         self.ends = []
         total = 0
         for path in self.files:
@@ -145,12 +181,27 @@ class ChunkDataset:
         with h5py.File(self.files[episode], "r") as f:
             state = _pack_group(f["state"], start)
             action = _pack_group(f["action"], slice(start, start + self.chunk))
-            image = resize_rgb(f["vision/cam_head/colors"][start], self.image_size)
+            # History frames end at the current step; positions before the
+            # episode start repeat the first frame (Diffusion Policy pad_before).
+            frames = [resize_rgb(f["vision/cam_head/colors"][max(0, start - offset)], self.image_size)
+                      for offset in range(self.obs_steps - 1, -1, -1)]
+        if self.augment:
+            # Jitter once per sample so the history keeps a consistent light
+            # field; independently jittered frames would corrupt motion cues.
+            parameters = augmentation_parameters()
+            frames = [augment_rgb(frame, parameters) for frame in frames]
+        if self.obs_steps > 1 and self.frame_dropout > 0 and np.random.random() < self.frame_dropout:
+            # Drop stale history: keep only the current frame.  Deployment can
+            # revisit history less often than training, so the policy must not
+            # depend on perfectly spaced frames.
+            frames = [frames[-1]] * self.obs_steps
         valid = np.arange(self.chunk) < len(action)
         action = np.concatenate([action, np.repeat(action[-1:], self.chunk - len(action), axis=0)])
         state = (state - self.stats["state_mean"]) / self.stats["state_std"]
         action = (action - self.stats["action_mean"]) / self.stats["action_std"]
-        return {"image": image.transpose(2, 0, 1).astype(np.float32) / 255,
+        image = (np.stack(frames).transpose(0, 3, 1, 2) if self.obs_steps > 1
+                 else frames[0].transpose(2, 0, 1))
+        return {"image": image.astype(np.float32) / 255,
                 "state": state.astype(np.float32), "action": action.astype(np.float32), "valid": valid}
 
 

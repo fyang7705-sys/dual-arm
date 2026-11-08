@@ -106,13 +106,20 @@ class ServePolicy:
         print(f"[policy-server] checkpoint={checkpoint}")
         print(
             f"[policy-server] kind={getattr(self.policy, 'kind', '?')} "
-            f"execute_steps={config.get('execute_steps', '?')} device={device}"
+            f"execute_steps={config.get('execute_steps', '?')} "
+            f"obs_steps={config.get('obs_steps', 1)} "
+            f"temporal_ensemble={config.get('temporal_ensemble', False)} "
+            f"device={device}"
         )
 
     # -- RPC surface (single env) -------------------------------------------
     def reset(self) -> None:
         self.obs = None
         self.batch_obs = {}
+        # Multi-frame history and temporal ensembling are per-episode state.
+        reset = getattr(self.policy, "reset", None)
+        if reset is not None:
+            reset()
 
     def update_obs(self, obs) -> None:
         self.obs = obs
@@ -124,10 +131,23 @@ class ServePolicy:
 
     # -- RPC surface (batched envs) -----------------------------------------
     def update_obs_batch(self, obs) -> None:
-        self.batch_obs = {index: item for index, item in enumerate(obs)}
+        """Cache observations by environment index, not by list position.
+
+        Deploy loops drop finished envs, so the active list becomes sparse
+        (e.g. ``[0, 2]``).  ``get_action_batch`` receives those same indices;
+        keying by list position made the second request look up a missing key
+        and returned actions for the wrong environments.
+        """
+        self.batch_obs = {}
+        for position, item in enumerate(obs):
+            index = item.get("env_idx", position) if isinstance(item, dict) else position
+            self.batch_obs[int(index)] = item
 
     def get_action_batch(self, env_idx_list=None):
-        indices = list(env_idx_list) if env_idx_list is not None else sorted(self.batch_obs)
+        indices = [int(index) for index in env_idx_list] if env_idx_list is not None else sorted(self.batch_obs)
+        missing = [index for index in indices if index not in self.batch_obs]
+        if missing:
+            raise RuntimeError(f"get_action_batch received observations for {sorted(self.batch_obs)}, not {missing}")
         observations = [self.batch_obs[index] for index in indices]
         return self._predict(observations)
 

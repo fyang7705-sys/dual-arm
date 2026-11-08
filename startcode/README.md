@@ -2,6 +2,9 @@
 
 本目录现已实现 ACT-CVAE / Diffusion 的离线训练，以及 ACT residual PPO /
 去噪链 PPO 的在线训练。使用头部 RGB + 16 维末端状态，输出 16 维末端动作。
+两条路线默认输入最近 2 帧观测；ACT 使用 30 步长动作块与官方
+`temporal_agg` 时间集成，Diffusion 使用 100 步训练 schedule、min-SNR 损失
+加权与 16 步 DDIM 推理。
 
 完整文件说明、核心代码解释、服务器部署、所有命令、输出与验证边界见
 [训练与仿真完整说明](../docs/TRAINING_AND_SIMULATION.md)。

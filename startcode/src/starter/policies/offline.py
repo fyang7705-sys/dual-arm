@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 
 import torch
 from torch.utils.data import DataLoader
@@ -27,42 +28,70 @@ def train(kind, config):
     if resume and resume["split"] != split:
         raise ValueError("Resume requires the same train/validation files and split seed")
     stats = resume["stats"] if resume else normalization_stats(train_files)
-    datasets = [ChunkDataset(paths, cfg["chunk"], cfg["image_size"], stats) for paths in (train_files, val_files)]
+    augment = bool(config.get("augment", False))
+    obs_steps = int(cfg.get("obs_steps", 1))
+    # Validation never drops frames: it must measure the deployed input shape.
+    frame_dropout = float(config.get("frame_dropout", 0.0)) if obs_steps > 1 else 0.0
+    datasets = [ChunkDataset(paths, cfg["chunk"], cfg["image_size"], stats,
+                             augment=augment and index == 0, obs_steps=obs_steps,
+                             frame_dropout=frame_dropout if index == 0 else 0.0)
+                for index, paths in enumerate((train_files, val_files))]
     batch_size, workers = int(config.get("batch_size", 32)), int(config.get("workers", 0))
     if batch_size < 1 or workers < 0:
         raise ValueError("batch_size must be positive and workers nonnegative")
     loaders = [DataLoader(dataset, batch_size=batch_size, shuffle=(index == 0), num_workers=workers,
                           pin_memory=device.type == "cuda") for index, dataset in enumerate(datasets)]
     model = build_model(kind, cfg).to(device)
-    if kind == "act" and resume is None and config.get("pretrained_backbone", True):
-        model.initialize_pretrained_backbone()
-    parameters = model.parameters()
-    if kind == "act":
+    if resume is None and config.get("pretrained_backbone", True):
+        initialize = getattr(model, "initialize_pretrained_backbone", None)
+        if initialize is not None:
+            initialize()
+    backbone = list(getattr(model, "backbone_parameters", lambda: [])())
+    if backbone:
+        identifiers = {id(p) for p in backbone}
         parameters = [
-            {"params": model.backbone.parameters(), "lr": float(config.get("backbone_lr", 1e-5))},
-            {"params": [p for name, p in model.named_parameters() if not name.startswith("backbone.")]},
+            {"params": backbone, "lr": float(config.get("backbone_lr", 1e-5))},
+            {"params": [p for p in model.parameters() if id(p) not in identifiers]},
         ]
+    else:
+        parameters = model.parameters()
     optimizer = torch.optim.AdamW(parameters, lr=float(config.get("learning_rate", 1e-4)),
                                   weight_decay=float(config.get("weight_decay", 1e-4)))
-    ema = copy.deepcopy(model).eval() if kind == "diffusion" else None
+    ema = copy.deepcopy(model).eval()
     start, best = 0, float("inf")
     if resume:
         model.load_state_dict(resume["model"])
         optimizer.load_state_dict(resume["optimizer"])
-        if ema is not None:
-            ema.load_state_dict(resume["ema"])
+        # Old ACT checkpoints carry no EMA; initialize it from the loaded weights.
+        ema.load_state_dict(resume["ema"] if resume.get("ema") is not None else model.state_dict())
         start, best = int(resume["epoch"]) + 1, float(resume["best_validation"])
         restore_rng(resume.get("rng"))
     epochs = int(config.get("epochs", 100))
     if epochs <= start:
         raise ValueError("epochs must exceed completed resume epoch")
+    schedule = str(config.get("lr_schedule", "constant"))
+    if schedule not in ("constant", "cosine"):
+        raise ValueError("lr_schedule must be constant or cosine")
+    warmup = int(config.get("lr_warmup_epochs", 0))
+    min_ratio = float(config.get("lr_min_ratio", 0.0))
+
+    def lr_factor(epoch):
+        if warmup > 0 and epoch < warmup:
+            return (epoch + 1) / warmup
+        if schedule == "cosine":
+            progress = min(1.0, max(0.0, (epoch - warmup + 1) / max(1, epochs - warmup)))
+            return min_ratio + (1 - min_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
+        return 1.0
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_factor, last_epoch=start - 1)
     directory = run_directory(config, kind, "offline")
     (directory / "split.json").write_text(json.dumps(split, indent=2), encoding="utf-8")
+    kl_warmup = int(config.get("kl_warmup_epochs", 0))
     for epoch in range(start, epochs):
         totals = []
         for phase, loader in enumerate(loaders):
             model.train(phase == 0)
-            evaluator = model if phase == 0 or ema is None else ema
+            evaluator = model if phase == 0 else ema
             total, count = 0.0, 0
             with torch.set_grad_enabled(phase == 0):
                 for batch in loader:
@@ -72,7 +101,8 @@ def train(kind, config):
                                                    batch["action"] if phase == 0 else None, batch["valid"])
                         error = (prediction - batch["action"]).abs().mean(-1)
                         reconstruction = (error * batch["valid"]).sum() / batch["valid"].sum().clamp_min(1)
-                        loss = reconstruction + float(config.get("kl_weight", 0.01)) * kl
+                        kl_factor = min(1.0, (epoch + 1) / kl_warmup) if kl_warmup > 0 else 1.0
+                        loss = reconstruction + kl_factor * float(config.get("kl_weight", 0.01)) * kl
                     else:
                         loss = evaluator.training_loss(**batch)
                     if not torch.isfinite(loss):
@@ -82,19 +112,19 @@ def train(kind, config):
                         loss.backward()
                         torch.nn.utils.clip_grad_norm_(model.parameters(), float(config.get("max_grad_norm", 1.0)))
                         optimizer.step()
-                        if ema is not None:
-                            with torch.no_grad():
-                                decay = float(config.get("ema_decay", 0.995))
-                                for target, source in zip(ema.parameters(), model.parameters()):
-                                    target.lerp_(source, 1 - decay)
+                        with torch.no_grad():
+                            decay = float(config.get("ema_decay", 0.995))
+                            for target, source in zip(ema.parameters(), model.parameters()):
+                                target.lerp_(source, 1 - decay)
                     total += float(loss.detach()) * len(batch["state"])
                     count += len(batch["state"])
             totals.append(total / count)
+        scheduler.step()
         improved = totals[1] < best
         best = min(best, totals[1])
         payload = {"format": FORMAT, "kind": kind, "stage": "offline", "action_dim": ACTION_DIM,
                    "model_config": cfg, "stats": stats, "model": clone_state(model),
-                   "ema": clone_state(ema) if ema is not None else None, "optimizer": optimizer.state_dict(),
+                   "ema": clone_state(ema), "optimizer": optimizer.state_dict(),
                    "epoch": epoch, "best_validation": best, "config": config, "split": split, "rng": rng_state()}
         save_checkpoint(directory / "policy_last.ckpt", payload)
         if improved:
@@ -103,6 +133,7 @@ def train(kind, config):
         if frequency > 0 and (epoch + 1) % frequency == 0:
             save_checkpoint(directory / f"policy_epoch_{epoch + 1}.ckpt", payload)
         append_metrics(directory, {"epoch": epoch + 1, "train_loss": totals[0], "validation_loss": totals[1],
+                                   "learning_rate": optimizer.param_groups[-1]["lr"],
                                    "train_frames": len(datasets[0]), "validation_frames": len(datasets[1])})
     print(f"[{kind}] checkpoint: {directory / 'policy_last.ckpt'}", flush=True)
     return directory / "policy_last.ckpt"

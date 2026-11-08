@@ -17,12 +17,20 @@ def simulator_command(config):
     if not (root / "task/RoboDojo").is_dir() or not (root / "Assets").is_dir():
         raise FileNotFoundError(f"Missing RoboDojo source or Assets under {root}")
     gpu = str(config.get("env_gpu", 0))
+    # AppLauncher expects --kit_args to be ONE string value.  Passing
+    # ``--kit_args --enable ...`` makes argparse consume ``--enable`` as the
+    # value, so Kit never receives the extension flags and the process exits
+    # during startup.
+    kit_args = "--enable isaacsim.replicator.behavior --enable isaacsim.sensors.camera"
     simulator = [str(REPO_ROOT / "scripts/isaac_env_server.py"), "--task", str(config["rollout_task"]),
                  "--env-cfg", str(config["env_cfg"]), "--num-envs", str(config.get("num_envs", 1)),
                  "--port", str(config.get("env_port", 5555)), "--host", str(config.get("env_host", "127.0.0.1")),
-                 "--seed", str(config.get("seed", 0)), "--layout-source", "random", "--device", "cuda:0",
-                 "--headless", "--enable_cameras", "--kit_args",
-                 "--enable isaacsim.replicator.behavior --enable isaacsim.sensors.camera"]
+                 "--seed", str(config.get("seed", 0)),
+                 "--layout-source", str(config.get("layout_source", "random")),
+                 "--device", "cuda:0",
+                 "--headless", "--enable_cameras", "--kit_args", kit_args]
+    if config.get("layout_seed") is not None:
+        simulator += ["--layout-seed", str(config["layout_seed"])]
     if config.get("domain_randomization", False):
         simulator.append("--domain-randomization")
     environment = dict(os.environ)

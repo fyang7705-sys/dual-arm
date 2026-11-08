@@ -1,5 +1,5 @@
 # 评测只固定任务、动作和镜像侧的卡。checkpoint 与策略环境名由你填写。
-task: stack_blocks
+task: stack_blocks_random
 env_cfg: arx_x5
 action_type: ee
 seed: 0
@@ -9,6 +9,7 @@ policy_gpu: 0
 env_gpu: 1
 # 你自己创建的 conda 环境名。没有策略镜像。
 policy_env: student
-# policies/diffusion 或 policies/act。
-policy_dir: policies/diffusion
+# 由 scripts/bootstrap_third_party.sh 生成的适配器目录。
+# policies/diffusion 只有服务端脚本，RoboDojo 客户端还需要 deploy.py / client 脚本。
+policy_dir: third_party/XPolicyLab/policy/StudentDiffusion
 ckpt: student-checkpoint

@@ -2,7 +2,10 @@
 
 `branch_w` implements visual ACT-CVAE and Diffusion Policy offline training,
 ACT residual PPO and diffusion denoising-chain PPO online training, remote Isaac
-simulation, and checkpoint-backed RoboDojo evaluation adapters.
+simulation, and checkpoint-backed RoboDojo evaluation adapters. Both policies use
+a pretrained ResNet18 visual trunk with a two-frame observation history; ACT adds
+long-chunk temporal ensembling, Diffusion uses a 100-step schedule with min-SNR
+loss weighting and 16-step DDIM inference.
 
 The runnable project remains in `startcode/`; its name is preserved for existing
 course commands. See [训练与仿真完整说明](docs/TRAINING_AND_SIMULATION.md) for every

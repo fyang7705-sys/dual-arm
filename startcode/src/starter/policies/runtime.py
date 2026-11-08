@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from datetime import datetime
 from pathlib import Path
@@ -51,12 +52,27 @@ def pick_device(config):
 
 def model_config(config):
     cfg = {"width": 128, "chunk": 10, "latent_dim": 32, "heads": 4, "layers": 2,
-           "diffusion_steps": 20, "image_size": 96, "execute_steps": 4}
+           "diffusion_steps": 20, "image_size": 96, "execute_steps": 4,
+           "backbone": "cnn", "dropout": 0.1, "obs_steps": 1, "inference_steps": 0,
+           "temporal_ensemble": False, "ensemble_k": 0.01, "min_snr_gamma": 0.0,
+           "decoder_layers": 0, "dim_feedforward": 0}
     cfg.update({key: config[key] for key in cfg if key in config})
     if int(cfg["width"]) % int(cfg["heads"]) or int(cfg["width"]) % 2:
         raise ValueError("width must be even and divisible by heads")
     if not 1 <= int(cfg["execute_steps"]) <= int(cfg["chunk"]):
         raise ValueError("execute_steps must be between 1 and chunk")
+    if int(cfg["obs_steps"]) < 1 or int(cfg["inference_steps"]) < 0:
+        raise ValueError("obs_steps must be positive and inference_steps nonnegative")
+    if str(cfg["backbone"]) not in ("cnn", "resnet18"):
+        raise ValueError("backbone must be cnn or resnet18")
+    if int(cfg["obs_steps"]) > 1 and str(cfg["backbone"]) != "resnet18":
+        raise ValueError("obs_steps > 1 requires backbone: resnet18")
+    if int(cfg["inference_steps"]) > int(cfg["diffusion_steps"]):
+        raise ValueError("inference_steps cannot exceed diffusion_steps")
+    if float(cfg["min_snr_gamma"]) < 0:
+        raise ValueError("min_snr_gamma must be nonnegative")
+    if int(cfg["decoder_layers"]) < 0 or int(cfg["dim_feedforward"]) < 0:
+        raise ValueError("decoder_layers and dim_feedforward must be nonnegative")
     return cfg
 
 
@@ -106,18 +122,84 @@ def append_metrics(directory, metrics):
     print(json.dumps(metrics, ensure_ascii=False), flush=True)
 
 
-def observation_arrays(observations, stats, size):
+def observation_image(observation):
+    return observation["image"] if "image" in observation else observation["vision"]["cam_head"]["color"]
+
+
+class FrameHistory:
+    """Per-slot frame buffer for multi-frame policies; pads with the oldest frame."""
+
+    def __init__(self, steps, size):
+        self.steps, self.size, self.slots = int(steps), size, {}
+
+    def push(self, slot, image):
+        buffer = self.slots.setdefault(slot, [])
+        buffer.append(resize_rgb(image, self.size).transpose(2, 0, 1))
+        del buffer[:-self.steps]
+        return self.stack(slot)
+
+    def stack(self, slot):
+        buffer = self.slots.get(slot)
+        if not buffer:
+            raise KeyError(f"No frame history for slot {slot}; push before stack")
+        return np.stack([buffer[0]] * (self.steps - len(buffer)) + buffer)
+
+    def reset(self):
+        self.slots.clear()
+
+
+class TemporalEnsemble:
+    """ACT ``temporal_agg`` with the reference weighting convention.
+
+    Predictions are weighted ``exp(-k * rank)`` where ``rank`` orders the
+    chunks covering the current step, oldest first.  This is exactly the ACT
+    reference evaluation script, so with ``k = 0.01`` older chunks dominate;
+    a negative ``k`` favors newer chunks instead.
+    """
+
+    def __init__(self, chunk, k):
+        self.chunk, self.k, self.slots = int(chunk), float(k), {}
+
+    def predict(self, slot, chunk):
+        state = self.slots.setdefault(slot, {"t": 0, "chunks": []})
+        t = state["t"]
+        state["chunks"] = [(start, candidate) for start, candidate in state["chunks"] if start + self.chunk > t]
+        state["chunks"].append((t, np.asarray(chunk, dtype=np.float32)))
+        total, weight = np.zeros(chunk.shape[-1], dtype=np.float32), 0.0
+        for rank, (start, candidate) in enumerate(state["chunks"]):
+            age = t - start
+            if 0 <= age < self.chunk:
+                value = math.exp(-self.k * rank)
+                total += value * candidate[age]
+                weight += value
+        state["t"] = t + 1
+        return total / max(weight, 1e-8)
+
+    def reset(self):
+        self.slots.clear()
+
+
+def observation_arrays(observations, stats, size, history=None, slots=None, push=False):
     images, states = [], []
-    for observation in observations:
-        if "image" in observation:
-            image, state = observation["image"], observation["proprio"]
+    for index, observation in enumerate(observations):
+        image = observation_image(observation)
+        state = observation["proprio"] if "proprio" in observation else pack_ee_action(observation["state"])
+        if history is not None:
+            slot = slots[index] if slots is not None else index
+            # ``push`` advances the control-rate history (deployment); without
+            # it the stack is read, initializing a never-seen slot from the
+            # current frame so standalone sampling still works.
+            images.append(history.push(slot, image) if push or slot not in history.slots
+                          else history.stack(slot))
         else:
-            image = observation["vision"]["cam_head"]["color"]
-            state = pack_ee_action(observation["state"])
-        images.append(resize_rgb(image, size).transpose(2, 0, 1))
+            images.append(resize_rgb(image, size).transpose(2, 0, 1))
         state = np.asarray(state, dtype=np.float32)
         if state.shape != (ACTION_DIM,) or not np.isfinite(state).all():
             raise ValueError("Policy needs a finite 16-D end-effector state")
+        # Training data canonicalizes quaternions to w >= 0; match it at inference.
+        for start in (3, 11):
+            if state[start] < 0:
+                state[start:start + 4] = -state[start:start + 4]
         states.append((state - stats["state_mean"]) / stats["state_std"])
     return np.stack(images), np.asarray(states, dtype=np.float32)
 
@@ -166,10 +248,24 @@ class Policy:
             self.residual = ResidualActor(self.config).to(self.device)
             self.residual.load_state_dict(self.payload["residual"])
             self.residual.eval()
+        obs_steps = int(self.config.get("obs_steps", 1))
+        self.history = FrameHistory(obs_steps, self.config["image_size"]) if obs_steps > 1 else None
+        self.ensemble = (TemporalEnsemble(int(self.config["chunk"]), float(self.config.get("ensemble_k", 0.01)))
+                         if self.config.get("temporal_ensemble") else None)
+
+    def reset(self):
+        """Clear per-episode state; the evaluation server calls this on reset."""
+        if self.history is not None:
+            self.history.reset()
+        if self.ensemble is not None:
+            self.ensemble.reset()
 
     @torch.no_grad()
     def predict(self, observations):
-        arrays = observation_arrays(observations, self.stats, self.config["image_size"])
+        slots = [obs.get("env_idx", index) if isinstance(obs, dict) else index
+                 for index, obs in enumerate(observations)]
+        arrays = observation_arrays(observations, self.stats, self.config["image_size"],
+                                    history=self.history, slots=slots, push=True)
         image, state = tensor_observations(*arrays, self.device)
         if self.kind == "act":
             action = self.model(image, state)[0]
@@ -184,7 +280,15 @@ class Policy:
         decoded = (action * std + mean).cpu().numpy()
         fallback = np.asarray([obs["proprio"] if "proprio" in obs else pack_ee_action(obs["state"])
                                for obs in observations])[:, None, :]
-        return project_actions(decoded, fallback)[:, :int(self.config["execute_steps"])]
+        if self.ensemble is not None:
+            # Re-query every step; average the overlapping chunks per slot.
+            actions = np.stack([self.ensemble.predict(slot, decoded[j])
+                                for j, slot in enumerate(slots)])[:, None, :]
+            return project_actions(actions, fallback)
+        # A multi-frame policy must advance one control step at a time so its
+        # frame history never skips observations between queries.
+        steps = 1 if self.history is not None else int(self.config["execute_steps"])
+        return project_actions(decoded, fallback)[:, :steps]
 
 
 def clone_state(model):

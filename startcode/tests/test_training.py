@@ -67,7 +67,8 @@ def test_full_offline_online_save_load_resume(config, kind):
     result = online(kind, {**config, "offline_checkpoint": str(initial)})
     after = load_payload(result)
     if kind == "act":
-        assert not changed(before["model"], after["model"])
+        # The frozen base is the offline EMA weights, deployed by default.
+        assert not changed(before["ema"], after["model"])
         assert after["residual"] is not None
         assert torch.count_nonzero(after["residual"]["mean.2.weight"]) > 0
     else:
@@ -100,6 +101,43 @@ def test_missing_data_cannot_silently_use_hold_demos(config):
         offline("act", {**config, "data_path": "/definitely/missing"})
 
 
+@pytest.mark.parametrize("kind", ["act", "diffusion"])
+def test_ppo_likelihood_uses_only_executed_action_prefix(config, kind):
+    settings = {**config, "epochs": 1, "chunk": 3, "execute_steps": 2, "diffusion_steps": 4}
+    path = offline(kind, settings)
+    learner = Learner(kind, settings, load_payload(path))
+    observations, _ = ToyBatchEnv(2).reset_batch([0, 1])
+    _, images, states, _, traces = learner.sample(observations)
+    image = torch.from_numpy(images).float() / 255
+    state = torch.from_numpy(states)
+    trace = {key: torch.stack([t[key] for t in traces]) for key in traces[0]}
+    assert trace["old_logprob"].shape[-1] == 2
+    if kind == "act":
+        distribution = learner.actor.distribution(image, state, trace["base"])
+        full = distribution.log_prob(trace["latent"]).flatten(1).sum(-1)
+        prefix = distribution.log_prob(trace["latent"])[..., :2, :].sum(-1)
+        torch.testing.assert_close(prefix, trace["old_logprob"], atol=1e-4, rtol=1e-5)
+        assert not torch.allclose(full, trace["old_logprob"].sum(-1))
+    else:
+        k = trace["time"].shape[1]
+        distribution = learner.model.distribution(trace["x"].flatten(0, 1), trace["time"].flatten(),
+                                                   image.repeat_interleave(k, 0), state.repeat_interleave(k, 0), .05)
+        full = distribution.log_prob(trace["next_x"].flatten(0, 1)).flatten(1).sum(-1).reshape(2, k)
+        prefix = distribution.log_prob(trace["next_x"].flatten(0, 1))[..., :2, :].sum(-1).reshape(2, k, 2)
+        torch.testing.assert_close(prefix, trace["old_logprob"], atol=1e-4, rtol=1e-5)
+        assert not torch.allclose(full, trace["old_logprob"].sum(-1))
+
+
+def test_prefix_step_mask_matches_early_episode_end():
+    from starter.policies.online import action_mask, masked_step_sum
+
+    durations = torch.tensor([1.0, 3.0])
+    values = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    mask = action_mask(durations, 3, values.device).squeeze(-1)
+    assert mask.tolist() == [[1.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
+    assert masked_step_sum(values, durations).tolist() == [0.0, 12.0]
+
+
 def test_gae_timeout_bootstraps_but_terminal_does_not():
     timeout = [{"reward": 1., "value": 2., "next_value": 3., "duration": 2, "boundary": True}]
     gae(timeout, .9, .95)
@@ -126,14 +164,15 @@ def test_exact_behavior_likelihood_replay(config, kind):
     image = torch.from_numpy(images).float() / 255
     state = torch.from_numpy(states)
     trace = {key: torch.stack([t[key] for t in traces]) for key in traces[0]}
+    steps = learner.execute_steps
     if kind == "act":
         distribution = learner.actor.distribution(image, state, trace["base"])
-        replay = distribution.log_prob(trace["latent"]).flatten(1).sum(-1)
+        replay = distribution.log_prob(trace["latent"])[..., :steps, :].sum(-1)
     else:
         k = trace["time"].shape[1]
         distribution = learner.model.distribution(trace["x"].flatten(0, 1), trace["time"].flatten(),
                                                    image.repeat_interleave(k, 0), state.repeat_interleave(k, 0), .05)
-        replay = distribution.log_prob(trace["next_x"].flatten(0, 1)).flatten(1).sum(-1).reshape(2, k)
+        replay = distribution.log_prob(trace["next_x"].flatten(0, 1))[..., :steps, :].sum(-1).reshape(2, k, steps)
     torch.testing.assert_close(replay, trace["old_logprob"], atol=1e-4, rtol=1e-5)
 
 

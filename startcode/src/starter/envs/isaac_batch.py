@@ -71,26 +71,63 @@ def install_parallel_control(task, observation_cfg: dict, task_name: str) -> Non
     task.take_action_batch = take_action_batch
 
 
-def bind_eval_layouts(task, task_name: str, config_name: str, seed: int = 0):
-    """Point each scene at an official eval layout before ``reset``.
+def bind_layout_bank(task, task_name: str, config_name: str, seed: int = 0, fallback: bool = True):
+    """Attach a saved-layout bank to a plain task before its first ``reset``.
 
-    Training seeds are layout indices modulo the number of saved layouts.
+    RoboDojo does not generate random scenes at reset time: it reloads one of
+    the JSON layouts under ``Assets/Eval_Layout/<bench>/<env_cfg>/<seed>/``.
+    Without a saved layout ``LayoutManager.load_saved_layout`` returns ``None``
+    and the scene contains no table/blocks at all.  The online server must
+    therefore bind a bank for random tasks too, not only for the eval path.
+
+    Each reset seed selects ``layouts[seed % len(layouts)]``.  A separate
+    layout seed lets online training use a disjoint bank from formal evaluation
+    (the shipped eval config uses seed 0, training defaults to seed 1).
     """
 
     from env.seed_manager.seed_manager import SeedManager
 
-    manager = SeedManager(
-        {
-            "num_envs": int(task.num_envs),
-            "task_name": task_name,
-            "config_name": config_name,
-            "seed": int(seed),
-        }
-    )
-    manager.init_eval()
-    layouts = list(manager.seed_list)
-    if not layouts:
-        raise RuntimeError(f"No eval layouts for {task_name} / {config_name}.")
+    attempts = [int(seed)]
+    if fallback and int(seed) != 0:
+        attempts.append(0)
+    manager, layouts, last_error = None, [], None
+    for attempt in attempts:
+        candidate = SeedManager(
+            {
+                "num_envs": int(task.num_envs),
+                "task_name": task_name,
+                "config_name": config_name,
+                "seed": attempt,
+            }
+        )
+        try:
+            candidate.init_eval()
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+            last_error = exc
+            continue
+        found = list(candidate.seed_list)
+        if found:
+            manager, layouts = candidate, found
+            if attempt != int(seed):
+                print(
+                    f"[env] layout seed {int(seed)} has no layouts; "
+                    f"falling back to seed {attempt}",
+                    flush=True,
+                )
+            break
+        last_error = RuntimeError(f"empty layout directory for seed {attempt}")
+    if manager is None or not layouts:
+        raise RuntimeError(
+            f"No saved layouts for {task_name} / {config_name} (seed {seed}): {last_error}"
+        )
+
+    cache = {}
+
+    def layout_for(index: int):
+        if index not in cache:
+            cache[index] = manager.get_seed_scene_info(index)
+        return deepcopy(cache[index])
+
     original = task.reset
 
     def reset(seed=None, options=None):
@@ -98,14 +135,20 @@ def bind_eval_layouts(task, task_name: str, config_name: str, seed: int = 0):
         if len(seeds) != int(task.num_envs):
             raise ValueError(f"Expected {task.num_envs} seeds, got {len(seeds)}.")
         for index, item in enumerate(seeds):
-            layout = layouts[int(item) % len(layouts)]
-            task.scene_manager.layout_manager.set_saved_layout(
-                index, manager.get_seed_scene_info(layout)
-            )
+            layout = layouts[(0 if item is None else int(item)) % len(layouts)]
+            task.scene_manager.layout_manager.set_saved_layout(index, layout_for(layout))
         return original(seed=list(seeds), options=options)
 
     task.reset = reset
+    print(
+        f"[env] layout bank {task_name} seed={seed} contains {len(layouts)} layouts",
+        flush=True,
+    )
     return len(layouts)
+
+
+# Backwards-compatible name for callers that only use the eval diagnostic path.
+bind_eval_layouts = bind_layout_bank
 
 
 def _controls_remain(task, env_idx_list) -> bool:

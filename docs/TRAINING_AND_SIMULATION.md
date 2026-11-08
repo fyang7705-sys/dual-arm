@@ -6,14 +6,14 @@
 
 | 路线 | 离线 | 在线 | 部署推理 |
 | --- | --- | --- | --- |
-| ACT | CNN 视觉特征、Transformer CVAE、动作块 L1 + KL | 冻结整个 ACT 基座，小幅有界残差 + PPO | 潜变量取零，残差取均值 |
-| Diffusion | 图像条件动作去噪、cosine DDPM schedule、噪声 MSE、EMA | 冻结前段去噪模型，对最后 K 步高斯转移做 PPO | 保存的冻结前段 + 更新后的后段；确定性去噪，从随机初始噪声开始 |
+| ACT | ImageNet ResNet18 空间视觉特征、2 帧观测历史、Transformer CVAE（dropout）、长动作块 L1 + KL（warmup）、EMA | 冻结整个 ACT 基座，小幅有界残差 + PPO（按控制步维护观测历史） | 潜变量取零，残差取均值，加载 EMA；顺序重叠动作块时间集成（temporal ensemble） |
+| Diffusion | ImageNet ResNet18 空间 token + Transformer 去噪器、100 步 cosine DDPM、min-SNR 加权噪声 MSE、2 帧观测历史、EMA | 冻结前段去噪模型，对最后 K 步高斯转移做 PPO | 保存的冻结前段 + 更新后的后段；16 步 DDIM（eta=0）确定性去噪，从随机初始噪声开始 |
 
-这些是本项目独立实现的紧凑基线，不是原论文所有实验设置的逐项复现。没有使用预训练视觉大模型，不会自动下载骨干网络权重。默认 96×96 图像、10 步动作块只是起始超参，不意味着足够取得高堆叠成功率。
+这些是本项目独立实现的基线，不是原论文所有实验设置的逐项复现。两条路线的视觉主干都是 ImageNet 预训练 ResNet18（FrozenBatchNorm），首次离线训练会下载骨干权重。默认 240×320 图像、训练期光度增强（亮度/对比度/饱和度抖动，不做空间裁剪与翻转，因为动作是绝对位姿标签）。默认 ACT 30 步、Diffusion 16 步动作块只是与官方实现对齐的起始超参，不意味着足够取得高堆叠成功率。旧检查点（无 `backbone` / `obs_steps` 配置键）仍按原紧凑 CNN / 单帧架构加载。
 
 选题接口：只有 `cam_head` RGB 和本体状态进入 actor/critic；本实现选择 16 维末端状态。每侧状态/动作是位置 xyz、四元数 wxyz、夹爪各 7+1 维，两侧合计 16。没有使用积木位置作为策略输入。奖励直接使用官方 `get_reward()` 的 0/1 成功信号，`get_score()` 的 0/15/100 仅写入日志。三块堆稳、收回机械臂等成功判定仍由上游任务维护，不修改任务外部奖励定义。
 
-离线示范来自标准版 `stack_blocks`；在线与正式评测默认 `stack_blocks_random`，包含不同积木集合和杂物。训练时根据 seed 新生成场景，不把正式评测布局用于训练。若课程最新通知另有规定，明确修改配置并在报告记录。
+离线示范来自标准版 `stack_blocks`；在线与正式评测默认 `stack_blocks_random`，包含不同积木集合和杂物。上游 RoboDojo 不在 reset 时程序化生成场景，而是从 `Assets/Eval_Layout/<bench>/<env_cfg>/<layout_seed>/` 重载保存布局；训练默认 `layout_seed: 1`，正式评测默认 seed 0，两者使用不同布局库。若课程最新通知另有规定，明确修改配置并在报告记录。
 
 本地验证使用小型合成 HDF5 和明确标记的假环境，全部限制 CPU。真实 Isaac Sim / PhysX / RTX、真实演示文件、服务器驱动与显存预算没有在本机验证。假环境最后一步总给 1，目的是测试训练与通信，不能把其成功率当作积木结果。真实评测结果必须由服务器生成 `_result.json` 与 `episode_*.mp4`。
 
@@ -38,11 +38,11 @@
 | `src/starter/pipelines/diffusion.py` | Diffusion 的直接 Python 入口 |
 | `src/starter/policies/act.py` | ACT 对外训练与加载函数，委托公共离线/在线引擎 |
 | `src/starter/policies/diffusion.py` | Diffusion 对外训练与加载函数 |
-| `src/starter/policies/models.py` | `Vision`、`Condition`、ACT CVAE、条件去噪器、DDPM、高斯残差 actor、视觉 critic |
-| `src/starter/policies/offline.py` | episode 切分、归一化、DataLoader、BC、验证、EMA、梯度裁剪、保存恢复 |
-| `src/starter/policies/online.py` | 环境采样、动作块执行、GAE、ACT residual PPO、去噪链 PPO、KL 停止、冻结检查、保存恢复 |
-| `src/starter/policies/runtime.py` | 随机种子/RNG、模型构建、检查点格式、预处理、动作投影、统一推理、JSONL 日志 |
-| `src/starter/data/demos.py` | HDF5 字段读取、图像解码、训练集统计、按需读取的 `ChunkDataset`；没有缺数据自动假训练 |
+| `src/starter/policies/models.py` | `Vision`、`Condition`、ACT CVAE、条件去噪器、DDPM/DDIM、min-SNR 损失、多帧视觉 embedding、高斯残差 actor、视觉 critic |
+| `src/starter/policies/offline.py` | episode 切分、归一化、DataLoader（多帧 + frame dropout）、BC、验证、EMA、梯度裁剪、保存恢复 |
+| `src/starter/policies/online.py` | 环境采样、控制步观测历史、动作块执行、GAE、ACT residual PPO、去噪链 PPO、KL 停止、冻结检查、保存恢复 |
+| `src/starter/policies/runtime.py` | 随机种子/RNG、模型构建、检查点格式、预处理、动作投影、多帧历史、时间集成、统一推理、JSONL 日志 |
+| `src/starter/data/demos.py` | HDF5 字段读取、图像解码、多帧历史与 frame dropout、训练集统计、按需读取的 `ChunkDataset`；没有缺数据自动假训练 |
 | `src/starter/envs/stack_blocks.py` | 官方任务到训练 reset/step 的适配、成功/超时/无效状态、保留原始 reward 与 score |
 | `src/starter/envs/isaac_batch.py` | 为普通任务绑定并行观测与末端 IK 控制、插值、物理步进；保留显式诊断用评测布局绑定函数 |
 | `src/starter/envs/remote.py` | TCP JSON/JPEG 服务器与客户端，reset/step/close、超时、错误信息、默认不发送特权位置 |
@@ -51,9 +51,8 @@
 | `src/starter/rewards/intrinsic.py` | 保留内在奖励扩展工具；默认零，本分支训练器不添加额外奖励 |
 | `src/starter/launch.py` | 激活 GPU 可见性、提前验证 checkpoint、启动/清理 Docker 或 native 仿真进程并运行学习器 |
 | `src/starter/sim_launch.py` | 单独启动环境服务器，供另一个终端的 external learner 使用 |
-| `src/starter/evaluation.py` | 基于真实 checkpoint 的 XPolicyLab 模型对象、单/批量预测、官方 WS PolicyServer |
+| `policies/eval_server.py` | 加载真实 checkpoint 的 XPolicyLab 单/批量 RPC 服务；`reset` 时清理多帧历史与时间集成状态 |
 | `src/starter/eval_deploy.py` | 无 GPU 依赖的官方评测循环桥，处理 chunk 中途结束与批量 active 环境变化 |
-| `src/starter/eval_launch.py` | 启动策略服务、等待就绪、启动官方 RoboDojo client、清理服务/容器 |
 | `scripts/bootstrap_third_party.sh` | 下载固定版本源码，建立 import/目录链接，安装 StudentACT/StudentDiffusion 评测桥 |
 | `scripts/download_stack_blocks.py` | 只下载所需 HDF5，可指定少量 episode，不下载全数据仓库 |
 | `scripts/download_stack_blocks.sh` | 原课程数据下载脚本，默认完整标准版数据；首次试跑优先用 Python 下载器 |
@@ -158,13 +157,18 @@ bash scripts/train_dp.sh --set epochs=100 --set seed=0
 ```python
 state = _pack_group(f["state"], start)
 action = _pack_group(f["action"], slice(start, start + self.chunk))
-image = resize_rgb(f["vision/cam_head/colors"][start], self.image_size)
+frames = [resize_rgb(f["vision/cam_head/colors"][max(0, start - offset)], self.image_size)
+          for offset in range(self.obs_steps - 1, -1, -1)]
 valid = np.arange(self.chunk) < len(action)
 ```
 
-动作块接近 episode 末尾时重复最后一个动作补齐，但用 `valid` mask 排除补齐项的训练损失。不会从下一条 episode 拼动作。每次取样只打开一个文件读取一个图像/状态/动作块，不把数十 GB 图像一次放进内存。默认 `workers=0`，服务器可逐步增加；没有跨 worker 共享 h5py 文件句柄。
+动作块接近 episode 末尾时重复最后一个动作补齐，但用 `valid` mask 排除补齐项的训练损失。不会从下一条 episode 拼动作。每次取样只打开一个文件读取图像/状态/动作块，不把数十 GB 图像一次放进内存。默认 `workers=0`，服务器可逐步增加；没有跨 worker 共享 h5py 文件句柄。
 
-原始 RGB 数组可直接缩放；正式编码图像使用 XPolicyLab 的 `decode_image_bit`，兼容旧格式及带颜色标记的新格式，不自行猜测 BGR/RGB。模型固定输入 `[B,3,S,S]` 的 0..1 RGB 和 `[B,16]` 归一化本体状态。
+`obs_steps=2`（两条路线默认）时返回 `[2,3,H,W]` 的连续两帧，episode 开头重复第一帧（与 Diffusion Policy 的 `pad_before` 一致），让策略看到运动方向。`frame_dropout: 0.1` 在训练时随机把历史帧折叠成当前帧，避免策略依赖“历史帧恰好按控制周期排列”；评测时策略服务器每次 RPC 都推进一帧，因此历史始终是控制频率。旧单帧检查点仍返回 `[3,H,W]`。
+
+状态与动作中的四元数在加载时统一规范化到 `w >= 0`（q 与 -q 是同一旋转），推理时的本体状态做同样处理，消除旋转目标的双峰监督。`augment: true` 时仅训练集做光度增强（亮度/对比度/饱和度抖动、少量高斯模糊），验证与评测关闭；不做空间裁剪或水平翻转，因为绝对位姿标签不随像素移动。
+
+原始 RGB 数组可直接缩放；正式编码图像使用 XPolicyLab 的 `decode_image_bit`，兼容旧格式及带颜色标记的新格式，不自行猜测 BGR/RGB。模型输入单帧时为 `[B,3,H,W]`、多帧时为 `[B,obs_steps,3,H,W]` 的 0..1 RGB，以及 `[B,16]` 归一化本体状态。
 
 ### 4.3 ACT：CVAE + 动作块 Transformer
 
@@ -176,7 +180,9 @@ latent = mu + (0.5 * logvar).exp() * torch.randn_like(mu)
 kl = (-0.5 * (1 + logvar - mu.square() - logvar.exp())).sum(-1).mean()
 ```
 
-CNN 的 4×4 空间 token、本体 token、潜变量 token 作为 decoder memory；H 个可学习 query 预测 `[B,H,16]` 动作。离线损失为有效动作的 L1 均值加 `kl_weight * KL`，优化器 AdamW，随后梯度裁剪。验证及部署时潜变量置零，不使用未来示范动作。没有巨大时间聚合缓存。
+ResNet18 的 stride-32 空间 token（240×320 下 8×10，两帧共 160 个）、本体 token、潜变量 token 作为 decoder memory；每帧先加一个可学习的帧序号 embedding，再共享同一套空间位置编码。H 个可学习 query 预测 `[B,H,16]` 动作。离线损失为有效动作的 L1 均值加 `kl_weight * KL`（默认 `kl_warmup_epochs` 内线性升到目标值），优化器 AdamW，backbone 单独小学习率，可选 cosine 学习率衰减，随后梯度裁剪。所有 Transformer 层带可配置 dropout，`decoder_layers` 与 `dim_feedforward` 可单独覆盖（默认复用 `layers` 和 `4*width`，0 表示不覆盖）。离线阶段与 Diffusion 一样维护 EMA 权重，验证和部署加载 EMA。验证及部署时潜变量置零，不使用未来示范动作。
+
+部署时每个控制步都重新查询策略，`obs_steps > 1` 保证帧历史连续。`temporal_ensemble: true` 时按官方 ACT 的 `temporal_agg` 对覆盖当前步的所有历史动作块做指数加权平均：权重为 `exp(-k * rank)`，`rank` 按动作块从旧到新排序，默认 `k=0.01` 因而更信任较早的块（与官方 `imitate_episodes.py` 和 LeRobot 的约定一致；需要更信任新块时把 `ensemble_k` 设为负数）。集成要求每控制步推理一次，因此 `Policy.predict` 在有历史或开启集成时只返回 1 个动作，而不是 `execute_steps` 个。
 
 ### 4.4 Diffusion：条件噪声预测与 EMA
 
@@ -187,7 +193,11 @@ noisy = abar.sqrt() * action + (1 - abar).sqrt() * noise
 prediction = self.denoiser(noisy, time, image, state)
 ```
 
-去噪器输入动作块、视觉/本体条件及正弦时间编码，使用残差 MLP 预测同形状噪声；只在有效动作位置计算噪声 MSE。cosine schedule 支持小步数测试，正式默认 20 步，可增加。
+去噪器输入动作块、视觉/本体条件及正弦时间编码。`backbone: resnet18`（默认）时使用 DiT 式 Transformer 去噪器：时间 token、本体 token、chunk 个动作 token 与 ResNet18 空间图像 token 做自注意力，从动作 token 位置读出噪声预测；两帧观测同样用共享 ResNet18 + 帧序号 embedding。`backbone: cnn` 保留旧紧凑 CNN + 残差 MLP 结构，仅用于加载旧检查点（不支持 `obs_steps>1`）。
+
+训练默认 100 步 cosine schedule，并对每个样本按 min-SNR-γ 加权（`min_snr_gamma: 5.0`，arXiv:2303.09556）：`w_t = min(SNR_t, γ) / SNR_t`，低噪声步不再主导梯度。只在有效动作位置计算噪声 MSE。
+
+推理默认 `inference_steps: 16`，在与训练相同的 100 步 schedule 上等距取 16 个时间点，用 eta=0 的 DDIM 更新（arXiv:2010.02502）：`x_{t-1} = sqrt(abar_{t-1}) * x0 + sqrt(1 - abar_{t-1}) * eps`。确定性前缀复用同一份图像 token，只有 PPO 训练的最后 K 个高斯转移保留 `denoising_min_std` 方差。设置 `inference_steps: 0` 会退回旧的逐步 DDPM 循环，保证旧检查点行为不变。
 
 离线更新后同步 EMA 参数。验证及离线部署加载 EMA；在线阶段从 EMA 初始化待训练模型，但不继续部署陈旧的离线 EMA。checkpoint 的 `ema=None` 明确表示部署更新后的模型。
 
@@ -221,7 +231,7 @@ online.train                        isaac_env_server.py
 
 自动模式由 `launch.py` 启动服务器，日志在 `outputs/simulator/`，退出时清理子进程和容器。native 模式明确设置独立 `SIM_PYTHON`。容器通过 NVIDIA Toolkit 暴露目标卡，不再依赖原 starter 中针对某台 Podman 主机手工挂载驱动库的代码。
 
-`isaac_env_server.py` 在导入 Isaac 相关任务前启动 AppLauncher，构建任务/机器人/相机配置，关闭腕部捕获。训练不调用 `bind_eval_layouts`，而按 seed 调用任务 reset 重新生成场景。`--layout-source eval` 仅为显式诊断选项，正式训练启动器固定 random，不拿评测布局训练。
+`isaac_env_server.py` 在导入 Isaac 相关任务前启动 AppLauncher，构建任务/机器人/相机配置，关闭腕部捕获。`bind_layout_bank` 在首次 reset 前写入保存布局，之后每次 reset 按 seed 取 `layouts[seed % N]`。训练使用 `layout_source: random` 与 `layout_seed: 1`，正式评测使用 seed 0；`--layout-source eval` 仅用于固定 eval 布局的诊断。
 
 可开启 `--set domain_randomization=true`，接通上游桌面、地面、背景随机化。不会自动改变质量、摩擦、相机标定等所有物理/视觉参数；这不等于完整 sim-to-real 域随机化。
 
@@ -240,13 +250,15 @@ action = base + self.scale * latent.tanh()
 
 因此残差每维限制在 `residual_scale` 内（乘动作标准差后才是实际物理尺度）。PPO 的概率针对未投影的 latent 计算，不错误地对四元数归一化后或夹爪裁剪后的动作计算高斯概率。部署使用 latent 的均值，保持同一动作组合方式。
 
+在线 value head 默认 `critic_shared: true`，直接复用冻结 ACT encoder 的池化特征（旧 online checkpoint 的独立 `Critic` 仍按 `condition.` 键检测并兼容）。PPO 似然只计算实际执行的 `execute_steps` 前缀，episode 在 chunk 中途结束时按 `duration` mask；可选 `residual_l2` 把残差均值拉回基座。
+
 每轮更新后 `assert_same_state` 对 ACT state_dict 每个 tensor 与冻结快照执行 `torch.equal`。优化器只持有 residual actor 参数；checkpoint 同时包含原基座与残差，其他机器无需猜测/寻找基座权重。
 
 ### 5.3 Diffusion 的去噪链 PPO
 
 离线 EMA 复制为两份：冻结的前段模型，以及可训练后段模型。默认最后 4 个去噪转移保留非零高斯方差（包括 t=0 的方差下限），记录每一步的 `x_t`、`x_(t-1)`、t 和旧 log probability。早期去噪使用冻结模型的均值，不参与本轮 PPO。
 
-更新时在相同观测与保存的链状态上重算：
+更新时在相同观测与保存的链状态上重算；value head 默认共享冻结前段 encoder 的特征，PPO 似然同样只覆盖实际执行的动作前缀：
 
 ```python
 dist = self.model.distribution(stored_x, stored_t, image, state, min_std)
@@ -259,7 +271,9 @@ logprob = dist.log_prob(stored_next_x).flatten(1).sum(-1)
 
 ### 5.4 动作块、回报与 GAE
 
-每次预测 H 步，默认只执行前 `execute_steps=4` 步再根据新相机画面重规划。动作执行前统一归一化两侧四元数并裁剪夹爪，训练和评测共用这个投影。
+每次预测 H 步，默认只执行前 `execute_steps` 步再根据新相机画面重规划（ACT 默认 4/30，Diffusion 默认 8/16）。在线采集时，多帧观测历史按每个物理控制步推进（`Learner.observe`），不会因为一次执行 8 步就跳过中间帧；PPO buffer 保存的 `image` 已经是 `[obs_steps,3,H,W]`，更新时直接复用。动作执行前统一归一化两侧四元数并裁剪夹爪，训练和评测共用这个投影。
+
+评测时，若开启观测历史或 ACT 时间集成，策略服务器每个控制步返回 1 个动作并重新推理，保证输入历史与训练一致；只有单帧、无集成的旧配置仍按 `execute_steps` 整块执行。Diffusion 的 DDIM 前缀会复用同一份视觉 token，避免 16 次去噪重复计算 ResNet18。
 
 一个策略决策可能跨 n 个控制步，累计回报是 `r0 + gamma*r1 + ...`。GAE 使用 `gamma**n` 的时间折扣，trace 使用 `(gamma*lambda)**n`。成功/无效终止的 next value 为 0；超时/人为采样上限使用最后观测的 V，但切断跨 reset 的 GAE。
 
@@ -315,7 +329,7 @@ bash scripts/eval_policy.sh --set kind=diffusion \
   --set ckpt=/absolute/diffusion/online/run/policy_last.ckpt --set eval_num=native
 ```
 
-流程为 `eval_launch` → `evaluation.Model/PolicyServer` → 上游 `robodojo.sh client` → `StudentACT/StudentDiffusion.deploy` → 真实策略预测。使用官方客户端生成 JSON/MP4，不用假环境日志替代。输出在 `third_party/RoboDojo/eval_result/`；外部 ROBODOJO_ROOT 则在对应仓库下。
+流程为 `scripts/eval_policy.sh` 启动 `policies/eval_server.py` → 上游 `robodojo.sh client` → `StudentACT/StudentDiffusion.deploy`（安装的 `eval_deploy.py`）→ 真实策略预测。使用官方客户端生成 JSON/MP4，不用假环境日志替代。输出在 `third_party/RoboDojo/eval_result/`；外部 ROBODOJO_ROOT 则在对应仓库下。
 
 `install_eval_adapters.py` 向忽略的 XPolicyLab 安装无 GPU 依赖的 deploy bridge、指向本项目 Model 的导出及启动脚本。`configure_sim.py` 只调整相机和并行数，不改任务。单独策略启动脚本用于课程约定的十参数服务接口；本项目最直接的正式评测命令是上面统一 wrapper，不将 starter 的 `policies/act` 路径误当成上游可导入策略包名。
 
@@ -347,17 +361,29 @@ CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
 
 有锁定的 XPolicyLab 时会额外执行官方 WebSocket 单/批量通信测试；没下载依赖时这一个测试显式 skip，其余数据/训练/TCP 测试不依赖 Isaac。合成数据只在测试临时目录生成，不进入 Git。默认没有大型 GPU 内存分配，没有运行本地 Isaac 或下载真实大数据。
 
-测试覆盖：跨 episode padding、训练/验证隔离与统计、真实离线梯度更新、两种在线更新、ACT 基座冻结、Diffusion 前段冻结、概率回放一致性、PPO clip、timeout bootstrap、动作有限值与四元数、检查点保存/加载/恢复、TCP JPEG 传输、官方 WS 接口。
+测试覆盖：跨 episode padding、训练/验证隔离与统计、真实离线梯度更新、两种在线更新、ACT 基座冻结、Diffusion 前段冻结、概率回放一致性、PPO clip、timeout bootstrap、动作有限值与四元数、检查点保存/加载/恢复、TCP JPEG 传输、官方 WS 接口；多帧观测历史（数据 padding / frame dropout / 运行期控制步推进）、ACT 时间集成权重顺序、DDIM 链的概率回放、min-SNR 加权、两路策略带历史的离线+在线端到端。
 
-本次本地验证记录：Python 3.10、PyTorch 2.13.0、CUDA_VISIBLE_DEVICES 为空，CPU 测试 29 项通过；官方 RGB 编码解码和 WS 测试使用 pins.lock 中固定的 XPolicyLab aa46382 代码，额外使用独立临时目录中的少量依赖源码，未下载真实 Assets/演示/镜像。也只读核对了固定的 RoboDojo f57e163 的任务、IK、相机、控制队列和评测入口 API。服务器策略环境仍推荐 Python 3.11，与课程运行环境保持一致。
+本次本地验证记录：Python 3.10、PyTorch 2.4.1、CUDA_VISIBLE_DEVICES 为空，CPU 测试 49 项通过（另有 2 项需要固定版 XPolicyLab 的 RGB/WS 联调，在未 bootstrap 的本机显式 skip）；官方 RGB 编码解码和 WS 测试使用 pins.lock 中固定的 XPolicyLab aa46382 代码，额外使用独立临时目录中的少量依赖源码，未下载真实 Assets/演示/镜像。也只读核对了固定的 RoboDojo f57e163 的任务、IK、相机、控制队列和评测入口 API。服务器策略环境仍推荐 Python 3.11，与课程运行环境保持一致。
 
 服务器仍需验证：真实 HDF5 格式与图像解码、课程镜像环境、固定版本的 Isaac API、真实随机场景构建/重置、IK 与物理步进、显存、长训练稳定性及成功率。启动前检查源码、资产、镜像、GPU；先一条真实评测，再扩展训练。不要把纯 CPU 测试通过写成机器人任务已完成。
+
+本轮改动的已知限制与调参建议：
+
+- 默认 `obs_steps: 2` 会让视觉前向计算量翻倍；若 24 GB 显存不足，先把 `batch_size` 从 16 降到 8，而不是退回单帧。
+- ACT 时间集成按官方约定让较早的动作块权重更大；如果实机抖动明显，可做 `ensemble_k: -0.01`（更信任新块）与 `ensemble_k: 0`（等权）的 A/B，而不是只调 `chunk`。
+- Diffusion 评测每个控制步要做 `inference_steps=16` 次去噪（视觉 token 已缓存）；如果评测时间不可接受，可先降到 10，或把 `inference_steps` 设为 0 退回旧的 100 步 DDPM 行为做对照。
+- `min_snr_gamma`、`obs_steps`、`chunk`、`execute_steps` 都是需要服务器 A/B 的超参；本机只验证了形状、梯度、概率回放和端到端可运行，不能证明它们一定提高堆叠成功率。
+- 队友反馈“官方 ACT 已训但提升不大”时，先区分是数据量/示教质量、相机视野、动作频率还是过拟合；本轮的观测历史、长动作块、时间集成、DDIM/min-SNR 是针对这些假设的工程手段，不是保证收益的结论。
+- 旧检查点（单帧、无 DDIM）仍可加载；但混用旧权重与新 `obs_steps`/`backbone` 配置会因 `load_state_dict` 结构不匹配而报错，这是预期行为。想启用多帧历史、min-SNR 或 DDIM，必须用新配置重新做离线训练（在线阶段沿用离线 checkpoint 里的 `model_config`）。
 
 Git 只提交源码、配置与说明；大数据、第三方仓库、镜像、训练 checkpoint、日志、视频留在服务器或另行备份。关闭 SSH 窗口不等于停止 GPU 进程；长任务用 tmux，结束后在平台确认资源计费状态。
 
 ## 8. 方法来源
 
-- [ACT 作者项目页](https://tonyzhaozh.github.io/aloha/)：动作块与 CVAE/Transformer 思路。
-- [Diffusion Policy 作者项目页](https://diffusion-policy.cs.columbia.edu/)：条件动作去噪学习。
+- [ACT 作者项目页](https://tonyzhaozh.github.io/aloha/) 与 [代码](https://github.com/tonyzhaozh/act)：动作块、CVAE/Transformer、`temporal_agg` 时间集成。
+- [Diffusion Policy 作者项目页](https://diffusion-policy.cs.columbia.edu/) 与 [代码](https://github.com/real-stanford/diffusion_policy)：条件动作去噪、两帧观测历史、receding horizon。
 - [DPPO 作者项目页](https://diffusion-ppo.github.io/)：扩散去噪内层 MDP 与 PPO。
+- [DDIM](https://arxiv.org/abs/2010.02502)：少步确定性反扩散，用于把 100 步训练 schedule 压到 16 步推理。
+- [Min-SNR 损失加权](https://arxiv.org/abs/2303.09556)：`min(SNR_t, γ)/SNR_t`，降低低噪声步对扩散训练的支配。
+- [LeRobot ACT/Diffusion 实现](https://github.com/huggingface/lerobot)：默认超参与官方 ACT 时间集成权重顺序的交叉核对。
 - 固定版本的 RoboDojo / XPolicyLab 负责实际任务、奖励与评测协议；本分支没有把上游大模型权重作为实现的一部分。

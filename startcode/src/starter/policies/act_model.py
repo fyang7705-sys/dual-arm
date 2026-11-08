@@ -1,7 +1,9 @@
 """Single-camera ACT: ResNet18, positional-attention Transformer and CVAE.
 
 Architecture follows https://github.com/tonyzhaozh/act, adapted to EE16.
-Positions enter attention queries/keys; values carry content only.
+Positions enter attention queries/keys; values carry content only.  With
+``obs_steps > 1`` the shared ResNet18 encodes a short frame history and a
+learned per-frame embedding preserves temporal order.
 """
 from __future__ import annotations
 
@@ -33,10 +35,12 @@ def spatial_position(height, width, channels, device):
 
 
 class EncoderLayer(nn.Module):
-    def __init__(self, width, heads):
+    def __init__(self, width, heads, dropout=0.0, dim_feedforward=None):
         super().__init__()
-        self.attention = nn.MultiheadAttention(width, heads, dropout=0, batch_first=True)
-        self.ff = nn.Sequential(nn.Linear(width, 4 * width), nn.ReLU(), nn.Linear(4 * width, width))
+        hidden = int(dim_feedforward) if dim_feedforward else 4 * width
+        self.attention = nn.MultiheadAttention(width, heads, dropout=dropout, batch_first=True)
+        self.ff = nn.Sequential(nn.Linear(width, hidden), nn.ReLU(), nn.Dropout(dropout),
+                                nn.Linear(hidden, width), nn.Dropout(dropout))
         self.norm1, self.norm2 = nn.LayerNorm(width), nn.LayerNorm(width)
 
     def forward(self, content, position, padding=None):
@@ -47,11 +51,13 @@ class EncoderLayer(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, width, heads):
+    def __init__(self, width, heads, dropout=0.0, dim_feedforward=None):
         super().__init__()
-        self.self_attention = nn.MultiheadAttention(width, heads, dropout=0, batch_first=True)
-        self.cross_attention = nn.MultiheadAttention(width, heads, dropout=0, batch_first=True)
-        self.ff = nn.Sequential(nn.Linear(width, 4 * width), nn.ReLU(), nn.Linear(4 * width, width))
+        hidden = int(dim_feedforward) if dim_feedforward else 4 * width
+        self.self_attention = nn.MultiheadAttention(width, heads, dropout=dropout, batch_first=True)
+        self.cross_attention = nn.MultiheadAttention(width, heads, dropout=dropout, batch_first=True)
+        self.ff = nn.Sequential(nn.Linear(width, hidden), nn.ReLU(), nn.Dropout(dropout),
+                                nn.Linear(hidden, width), nn.Dropout(dropout))
         self.norm1, self.norm2, self.norm3 = (nn.LayerNorm(width) for _ in range(3))
 
     def forward(self, content, query_position, memory, memory_position):
@@ -70,9 +76,20 @@ class ACT(nn.Module):
         from torchvision.ops.misc import FrozenBatchNorm2d
 
         width, heads, layers = (int(config[key]) for key in ("width", "heads", "layers"))
+        dropout = float(config.get("dropout", 0.1))
+        obs_steps = int(config.get("obs_steps", 1))
+        decoder_layers = int(config.get("decoder_layers", 0)) or layers
+        feedforward = int(config.get("dim_feedforward", 0)) or None
         if width % 4:
             raise ValueError("ACT width must be divisible by 4 for 2-D position encoding")
+        if obs_steps < 1 or decoder_layers < 1:
+            raise ValueError("obs_steps must be positive and decoder_layers at least one")
         self.chunk, self.latent_dim = int(config["chunk"]), int(config["latent_dim"])
+        self.obs_steps = obs_steps
+        # Only multi-frame models own this parameter, so single-frame checkpoints
+        # written before history support still load bit-exactly.
+        self.frame_embed = (nn.Parameter(torch.randn(1, obs_steps, 1, width) * 0.02)
+                            if obs_steps > 1 else None)
         backbone = resnet18(weights=None, norm_layer=FrozenBatchNorm2d)
         self.backbone = nn.Sequential(*list(backbone.children())[:-2])
         self.image_projection = nn.Conv2d(512, width, 1)
@@ -82,13 +99,14 @@ class ACT(nn.Module):
         self.posterior_state = nn.Linear(ACTION_DIM, width)
         self.action_embed = nn.Linear(ACTION_DIM, width)
         self.cls = nn.Parameter(torch.zeros(1, 1, width))
-        self.posterior = nn.ModuleList(EncoderLayer(width, heads) for _ in range(layers))
+        self.posterior = nn.ModuleList(EncoderLayer(width, heads, dropout, feedforward) for _ in range(layers))
         self.posterior_out = nn.Linear(width, 2 * self.latent_dim)
         self.latent_projection = nn.Linear(self.latent_dim, width)
         self.extra_position = nn.Parameter(torch.randn(1, 2, width) * .02)
         self.queries = nn.Parameter(torch.randn(1, self.chunk, width) * .02)
-        self.encoder = nn.ModuleList(EncoderLayer(width, heads) for _ in range(layers))
-        self.decoder = nn.ModuleList(DecoderLayer(width, heads) for _ in range(layers))
+        self.encoder = nn.ModuleList(EncoderLayer(width, heads, dropout, feedforward) for _ in range(layers))
+        self.decoder = nn.ModuleList(DecoderLayer(width, heads, dropout, feedforward)
+                                     for _ in range(decoder_layers))
         self.decoder_norm = nn.LayerNorm(width)
         self.output = nn.Linear(width, ACTION_DIM)
 
@@ -99,7 +117,10 @@ class ACT(nn.Module):
         source = resnet18(weights=ResNet18_Weights.DEFAULT, norm_layer=FrozenBatchNorm2d)
         self.backbone.load_state_dict(nn.Sequential(*list(source.children())[:-2]).state_dict())
 
-    def forward(self, image, state, actions=None, valid=None):
+    def backbone_parameters(self):
+        return self.backbone.parameters()
+
+    def forward(self, image, state, actions=None, valid=None, return_features=False):
         batch, width = len(state), self.queries.shape[-1]
         latent = state.new_zeros(batch, self.latent_dim)
         kl = state.new_zeros(())
@@ -116,14 +137,34 @@ class ACT(nn.Module):
             logvar = logvar.clamp(-10, 10)
             latent = mu + (.5 * logvar).exp() * torch.randn_like(mu)
             kl = (-.5 * (1 + logvar - mu.square() - logvar.exp())).sum(-1).mean()
-        feature = self.image_projection(self.backbone((image - self.image_mean) / self.image_std))
-        position = spatial_position(*feature.shape[-2:], width, image.device)
+        if image.dim() == 5:
+            frames = int(image.shape[1])
+            if self.frame_embed is None or frames != self.obs_steps:
+                raise ValueError(f"ACT with obs_steps={self.obs_steps} expects {self.obs_steps} frames, got {frames}")
+            flat = image.reshape(batch * frames, *image.shape[2:])
+            feature = self.image_projection(self.backbone((flat - self.image_mean) / self.image_std))
+            grid = int(feature.shape[-2] * feature.shape[-1])
+            tokens = feature.flatten(2).transpose(1, 2).reshape(batch, frames, grid, width)
+            visual = (tokens + self.frame_embed).reshape(batch, frames * grid, width)
+            position = spatial_position(*feature.shape[-2:], width, image.device).repeat(1, frames, 1)
+        elif image.dim() == 4:
+            if self.obs_steps != 1:
+                raise ValueError(f"ACT with obs_steps={self.obs_steps} expects a [B,T,3,H,W] image history")
+            feature = self.image_projection(self.backbone((image - self.image_mean) / self.image_std))
+            visual = feature.flatten(2).transpose(1, 2)
+            position = spatial_position(*feature.shape[-2:], width, image.device)
+        else:
+            raise ValueError("ACT image must be [B,3,H,W] or [B,obs_steps,3,H,W]")
         memory = torch.cat((self.latent_projection(latent)[:, None], self.state_projection(state)[:, None],
-                            feature.flatten(2).transpose(1, 2)), 1)
+                            visual), 1)
         position = torch.cat((self.extra_position, position), 1)
         for layer in self.encoder:
             memory = layer(memory, position)
         content = state.new_zeros(batch, self.chunk, width)
         for layer in self.decoder:
             content = layer(content, self.queries, memory, position)
-        return self.output(self.decoder_norm(content)), kl
+        action = self.output(self.decoder_norm(content))
+        if return_features:
+            # Frozen encoder summary for the online value head.
+            return action, kl, memory.mean(1)
+        return action, kl

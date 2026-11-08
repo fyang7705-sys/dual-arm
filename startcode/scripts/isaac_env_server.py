@@ -22,6 +22,12 @@ parser.add_argument("--host", default="127.0.0.1")
 parser.add_argument("--num-envs", type=int, default=1)
 parser.add_argument("--once", action="store_true")
 parser.add_argument("--layout-source", choices=("random", "eval"), default="random")
+parser.add_argument(
+    "--layout-seed",
+    type=int,
+    default=None,
+    help="Saved-layout bank seed. Defaults to --seed for eval and 1+ --seed for training.",
+)
 parser.add_argument("--seed", type=int, default=0)
 parser.add_argument("--domain-randomization", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
@@ -45,7 +51,7 @@ def main() -> None:
     src = os.path.join(repo, "src")
     if src not in sys.path:
         sys.path.insert(0, src)
-    from starter.envs.isaac_batch import bind_eval_layouts, install_parallel_control
+    from starter.envs.isaac_batch import bind_layout_bank, install_parallel_control
     from starter.envs.remote import serve
     from starter.envs.stack_blocks import ParallelAdapter
 
@@ -96,9 +102,22 @@ def main() -> None:
     OmegaConf.update(env_cfg, "sim.device", args.device, force_add=True)
     task = task_class(env_cfg, simulation_app)
     install_parallel_control(task, eval_cfg.get("observation", {}), task_name)
+    # RoboDojo only builds scenes from saved layouts.  The old "random" path
+    # silently skipped binding and produced an empty world (no table, no
+    # blocks), which made online rollouts meaningless.  Bind a layout bank in
+    # both modes; training uses a different layout seed than formal eval.
     if args.layout_source == "eval":
-        bind_eval_layouts(task, task_name, args.env_cfg, seed=args.seed)
-    print(f"[env] task {task_name} ready num_envs {width} layouts={args.layout_source}", flush=True)
+        layout_seed = int(args.seed)
+    elif args.layout_seed is not None:
+        layout_seed = int(args.layout_seed)
+    else:
+        layout_seed = int(args.seed) + 1
+    bind_layout_bank(task, task_name, args.env_cfg, seed=layout_seed)
+    print(
+        f"[env] task {task_name} ready num_envs {width} "
+        f"layout_source={args.layout_source} layout_seed={layout_seed}",
+        flush=True,
+    )
     try:
         serve(ParallelAdapter(task), args.host, args.port, once=args.once)
     finally:

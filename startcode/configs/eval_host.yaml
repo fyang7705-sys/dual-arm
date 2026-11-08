@@ -15,11 +15,11 @@ env_gpu: 1
 policy_env: robodojo
 sim_env: robodojo
 
-# 服务端：policies/act/setup_eval_policy_server.sh 启动本仓库的 ACT 服务。
+# 服务端：bootstrap 生成的 StudentACT 适配器转发到本仓库的 ACT 服务。
 # ckpt 可以是 latest、outputs/act 下的目录/文件名，或 .ckpt 的绝对路径。
-policy_dir: policies/act
+policy_dir: third_party/XPolicyLab/policy/StudentACT
 ckpt: latest
 
 # 客户端：RoboDojo 按目录名 import XPolicyLab.policy.<名字>.deploy。
-# 上游 ACT 的 deploy.py 是通用评测循环，直接复用，不必自己写。
-client_policy_dir: third_party/XPolicyLab/policy/ACT
+# StudentACT 里安装的是本仓库的 eval_deploy.py。
+client_policy_dir: third_party/XPolicyLab/policy/StudentACT

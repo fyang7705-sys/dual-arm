@@ -13,27 +13,51 @@ max_episodes: 0
 val_fraction: 0.1
 # ACT: full positional-attention Transformer with ImageNet ResNet18.
 pretrained_backbone: true
+backbone: resnet18
 backbone_lr: 0.00001
 device: auto
 policy_gpu: 0
 env_gpu: 1
-width: 256
+width: 512
 heads: 8
 layers: 4
+# Capacity knobs, 0 keeps the 4x-FFN / encoder-depth default. Official ACT
+# uses 7 decoder layers (a known bug only trained one of them) and 3200 FFN;
+# treat these as A/B options, not automatic wins.
+decoder_layers: 0
+dim_feedforward: 0
+dropout: 0.1
+augment: true
 latent_dim: 32
 image_size:
   - 240
   - 320
-chunk: 10
+# Two consecutive head-camera frames give the policy velocity cues. Training
+# pads the history before the episode start with the first frame and randomly
+# collapses stale history (frame_dropout) so deployment timing changes do not
+# silently break the policy.
+obs_steps: 2
+frame_dropout: 0.1
+# Long chunks smooth bimanual contact; temporal ensembling averages overlapping
+# predictions at every control step (official ACT k=0.01, older chunks weigh
+# more). Evaluation therefore re-plans once per control step.
+chunk: 30
 execute_steps: 4
+temporal_ensemble: true
+ensemble_k: 0.01
+# Unused by ACT but kept in the shared model config.
 diffusion_steps: 20
 epochs: 100
-batch_size: 8
+batch_size: 16
 workers: 0
 learning_rate: 0.0001
 weight_decay: 0.0001
-kl_weight: 0.01
-ema_decay: 0.995
+kl_weight: 10
+kl_warmup_epochs: 10
+ema_decay: 0.999
+lr_schedule: cosine
+lr_warmup_epochs: 2
+lr_min_ratio: 0.05
 max_grad_norm: 1.0
 save_every: 10
 # Must set to your own offline checkpoint before the online stage.
@@ -41,6 +65,11 @@ offline_checkpoint: null
 resume: null
 env_backend: remote
 env_launch: docker
+# RoboDojo reloads saved layouts; it does not generate scenes at reset time.
+# random = saved random-task layout bank, eval = fixed eval bank.
+layout_source: random
+# Keep training layouts disjoint from formal eval (eval.yaml defaults to 0).
+layout_seed: 1
 sim_image: stack-blocks-sim:isaacsim5.1
 num_envs: 1
 allow_shared_gpu: false
@@ -57,10 +86,16 @@ gae_lambda: 0.95
 ppo_epochs: 4
 ppo_batch_size: 32
 ppo_clip: 0.2
+value_clip: 0.2
 actor_lr: 0.00001
 critic_lr: 0.0001
 target_kl: 0.03
 entropy_coef: 0.0
+# Value head shares the frozen ACT encoder (sample-efficient under sparse reward).
+critic_shared: true
+# Small L2 anchor keeps the residual near the frozen ACT base when rewards
+# are sparse. 0 disables it; try 1e-4 .. 1e-3.
+residual_l2: 0.0001
 residual_scale: 0.1
 residual_std: 0.3
 finetune_denoising_steps: 4
