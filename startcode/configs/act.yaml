@@ -1,0 +1,48 @@
+# ACT offline behavior cloning (route B, stage 1).
+# Run from the startcode root: bash scripts/train_act.sh
+
+bench_name: RoboDojo
+data_task: stack_blocks
+rollout_task: stack_blocks
+eval_task: stack_blocks
+env_cfg: arx_x5
+action_type: ee
+seed: 0
+
+data_path: data/RoboDojo/stack_blocks/arx_x5
+max_episodes: 0
+val_ratio: 0.1
+augment: true             # photometric jitter only; see augment_spatial
+augment_spatial: false  # do not shift pixels while keeping absolute EE labels fixed
+
+# Observation / action layout.
+state_dim: 16
+action_dim: 16
+chunk_size: 16
+image_size: 96
+spatial_tokens: true       # preserve 4x4 camera layout for block localization
+
+# ACT-CVAE transformer.
+latent_dim: 32
+d_model: 256
+nhead: 4
+dim_feedforward: 512
+decoder_layers: 2
+dropout: 0.1
+kl_weight: 1.0
+kl_warmup_epochs: 20       # avoid posterior collapse seen in the previous run
+
+# Optimization.
+device: cuda
+epochs: 200
+batch_size: 64
+learning_rate: 0.0001
+weight_decay: 0.0001
+warmup_steps: 500
+grad_clip: 1.0
+num_workers: 2
+log_every: 20
+save_every: 25
+
+# Evaluation executes the predicted chunk open-loop, like ACT.
+eval_chunk_size: 1        # closed-loop replanning; do not execute stale 16-step chunks

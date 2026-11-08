@@ -1,0 +1,4 @@
+# Pins checked against GitHub HEAD on 2026-10-22.
+# scripts/bootstrap_third_party.sh checks out these commits.
+RoboDojo f57e1633ffed59761bc8e568cfe7530c4b33381c
+XPolicyLab aa46382aa12dc46b360e2fdc63d0d3d39215b3e9
