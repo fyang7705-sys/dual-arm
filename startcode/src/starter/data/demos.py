@@ -120,11 +120,15 @@ class ChunkDataset:
     No persistent h5py handles cross DataLoader worker/fork boundaries. Padding
     stays inside its episode, and validation episodes never enter train stats.
     """
-    def __init__(self, files, chunk, image_size, stats):
+    def __init__(self, files, chunk, image_size, stats, obs_steps=None):
         self.files, self.chunk, self.image_size, self.stats = list(files), int(chunk), image_size, stats
         shape = [image_size] if isinstance(image_size, int) else image_size
         if self.chunk < 1 or not shape or min(shape) < 16:
             raise ValueError("chunk must be positive and image_size >=16")
+        self.temporal = obs_steps is not None
+        self.obs_steps = int(obs_steps) if self.temporal else 1
+        if self.obs_steps < 1:
+            raise ValueError("obs_steps must be positive")
         self.ends = []
         total = 0
         for path in self.files:
@@ -143,14 +147,18 @@ class ChunkDataset:
         episode = bisect.bisect_right(self.ends, index)
         start = index - (self.ends[episode - 1] if episode else 0)
         with h5py.File(self.files[episode], "r") as f:
-            state = _pack_group(f["state"], start)
+            history = [max(0, start - self.obs_steps + 1 + i) for i in range(self.obs_steps)]
+            state = np.stack([_pack_group(f["state"], t) for t in history])
             action = _pack_group(f["action"], slice(start, start + self.chunk))
-            image = resize_rgb(f["vision/cam_head/colors"][start], self.image_size)
+            image = np.stack([resize_rgb(f["vision/cam_head/colors"][t], self.image_size) for t in history])
         valid = np.arange(self.chunk) < len(action)
         action = np.concatenate([action, np.repeat(action[-1:], self.chunk - len(action), axis=0)])
         state = (state - self.stats["state_mean"]) / self.stats["state_std"]
         action = (action - self.stats["action_mean"]) / self.stats["action_std"]
-        return {"image": image.transpose(2, 0, 1).astype(np.float32) / 255,
+        image = image.transpose(0, 3, 1, 2).astype(np.float32) / 255
+        if not self.temporal:
+            image, state = image[0], state[0]
+        return {"image": image,
                 "state": state.astype(np.float32), "action": action.astype(np.float32), "valid": valid}
 
 

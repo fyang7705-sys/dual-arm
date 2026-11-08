@@ -113,9 +113,11 @@ class ServePolicy:
     def reset(self) -> None:
         self.obs = None
         self.batch_obs = {}
+        self.policy.reset()
 
     def update_obs(self, obs) -> None:
         self.obs = obs
+        self.policy.observe([obs])
 
     def get_action(self):
         if self.obs is None:
@@ -124,7 +126,8 @@ class ServePolicy:
 
     # -- RPC surface (batched envs) -----------------------------------------
     def update_obs_batch(self, obs) -> None:
-        self.batch_obs = {index: item for index, item in enumerate(obs)}
+        self.batch_obs = {item["env_idx"]: item for item in obs}
+        self.policy.observe(obs)
 
     def get_action_batch(self, env_idx_list=None):
         indices = list(env_idx_list) if env_idx_list is not None else sorted(self.batch_obs)
@@ -133,7 +136,7 @@ class ServePolicy:
 
     # -- inference -----------------------------------------------------------
     def _predict(self, observations: list[dict]) -> list[list[dict]]:
-        actions = self.policy.predict(list(observations))
+        actions = self.policy.predict(list(observations), update_history=False)
         return [
             unpack_robot_state(chunk, self.action_type, self.robot_info, source_type="obs")
             for chunk in actions
