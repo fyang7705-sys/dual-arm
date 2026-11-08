@@ -1,0 +1,37 @@
+{
+  "run_id": "2026-11-08_10-45-21",
+  "save_dir": "eval_result/RoboDojo/stack_blocks/ACT/arx_x5/0_ckpt_name=policy_last.ckpt,action_type=ee/2026-11-08_10-45-21",
+  "task_name": "stack_blocks",
+  "policy_name": "ACT",
+  "config_name": "arx_x5",
+  "eval_seed": 0,
+  "additional_info": "ckpt_name=policy_last.ckpt,action_type=ee",
+  "success_nums": 0,
+  "fail_nums": 3,
+  "unstable_nums": 0,
+  "total_score": 0.0,
+  "completed_layout_ids": [
+    0,
+    1,
+    2
+  ],
+  "abandoned_layout_ids": [],
+  "details": {
+    "0": {
+      "layout_id": 0,
+      "success": false,
+      "score": 0.0
+    },
+    "1": {
+      "layout_id": 1,
+      "success": false,
+      "score": 0.0
+    },
+    "2": {
+      "layout_id": 2,
+      "success": false,
+      "score": 0.0
+    }
+  },
+  "restart_count": 0
+}
