@@ -74,8 +74,11 @@ def main():
             source = config.get("resume") or config.get("offline_checkpoint")
             if not source:
                 raise ValueError("Set offline_checkpoint or resume before launching simulation")
-            if load_payload(source)["kind"] != kind:
+            payload = load_payload(source)
+            if payload["kind"] != kind:
                 raise ValueError("Checkpoint kind mismatch")
+            if kind == "act" and payload["model_config"]["camera_names"] != ["cam_head"]:
+                raise ValueError("Multi-camera ACT supports offline training and evaluation; residual PPO requires cam_head only")
             mode = config.get("env_launch", "docker")
             if config.get("env_backend", "remote") != "fake" and mode != "external":
                 same = str(config.get("policy_gpu", 0)) == str(config.get("env_gpu", 1))

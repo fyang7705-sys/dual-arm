@@ -53,8 +53,14 @@ def pick_device(config):
 def model_config(config):
     cfg = {"width": 128, "chunk": 10, "latent_dim": 32, "heads": 4, "layers": 2,
            "diffusion_steps": 100, "inference_steps": 100, "image_size": 96, "execute_steps": 4,
-           "n_obs_steps": 3, "down_dims": [256, 512, 1024], "diffusion_step_embed_dim": 128}
+           "n_obs_steps": 3, "down_dims": [256, 512, 1024], "diffusion_step_embed_dim": 128,
+           "camera_names": ["cam_head"]}
     cfg.update({key: config[key] for key in cfg if key in config})
+    cameras = cfg["camera_names"]
+    if (not isinstance(cameras, list) or not cameras
+            or any(not isinstance(name, str) or not name for name in cameras)
+            or len(set(cameras)) != len(cameras)):
+        raise ValueError("camera_names must be a nonempty list of unique camera names")
     if int(cfg["width"]) % int(cfg["heads"]) or int(cfg["width"]) % 2:
         raise ValueError("width must be even and divisible by heads")
     if not 1 <= int(cfg["execute_steps"]) <= int(cfg["chunk"]):
@@ -108,15 +114,20 @@ def append_metrics(directory, metrics):
     print(json.dumps(metrics, ensure_ascii=False), flush=True)
 
 
-def observation_arrays(observations, stats, size):
+def observation_arrays(observations, stats, size, camera_names=None):
     images, states = [], []
     for observation in observations:
-        if "image" in observation:
-            image, state = observation["image"], observation["proprio"]
-        else:
-            image = observation["vision"]["cam_head"]["color"]
-            state = pack_ee_action(observation["state"])
-        images.append(resize_rgb(image, size).transpose(2, 0, 1))
+        frames = []
+        for camera in camera_names if camera_names is not None else ["cam_head"]:
+            if camera in observation.get("vision", {}):
+                image = observation["vision"][camera]["color"]
+            elif camera == "cam_head" and "image" in observation:
+                image = observation["image"]
+            else:
+                raise KeyError(f"Policy observation requires vision.{camera}.color")
+            frames.append(resize_rgb(image, size).transpose(2, 0, 1))
+        images.append(np.stack(frames) if camera_names is not None else frames[0])
+        state = observation["proprio"] if "proprio" in observation else pack_ee_action(observation["state"])
         state = np.asarray(state, dtype=np.float32)
         if state.shape != (ACTION_DIM,) or not np.isfinite(state).all():
             raise ValueError("Policy needs a finite 16-D end-effector state")
@@ -215,12 +226,13 @@ class Policy:
                 self.observe(observations)
             arrays = self.history.arrays(observations)
         else:
-            arrays = observation_arrays(observations, self.stats, self.config["image_size"])
+            arrays = observation_arrays(observations, self.stats, self.config["image_size"],
+                                        camera_names=self.config["camera_names"])
         image, state = tensor_observations(*arrays, self.device)
         if self.kind == "act":
             action = self.model(image, state)[0]
             if self.residual is not None:
-                latent = self.residual.distribution(image, state, action).mean
+                latent = self.residual.distribution(image[:, 0], state, action).mean
                 action = action + float(self.payload["residual_scale"]) * latent.tanh()
         else:
             suffix = self.payload.get("finetune_denoising_steps", 0) if self.diffusion_base is not None else 0

@@ -19,7 +19,7 @@ from starter.envs.remote import RemoteEnv, serve
 from starter.interfaces import ARM_KEYS, ARM_WIDTHS
 from starter.policies.offline import train as offline
 from starter.policies.online import Learner, clipped_objective, gae, train as online
-from starter.policies.runtime import Policy, load_payload, project_actions
+from starter.policies.runtime import Policy, load_payload, observation_arrays, project_actions
 
 torch.set_num_threads(1)
 
@@ -40,7 +40,10 @@ def config(tmp_path):
                     else:
                         values[:] = 0.5
                     group.create_dataset(key + "s", data=values)
-            f.create_dataset("vision/cam_head/colors", data=np.full((4, 16, 16, 3), 40 + episode, np.uint8))
+            for index, camera in enumerate(("cam_head", "cam_right_wrist", "cam_left_wrist")):
+                images = np.full((4, 16, 16, 3), 40 + episode + index * 60, np.uint8)
+                images += np.arange(4, dtype=np.uint8)[:, None, None, None]
+                f.create_dataset(f"vision/{camera}/colors", data=images)
     return {"data_path": str(data.parent), "output_root": str(tmp_path / "outputs"),
             "pretrained_backbone": False, "seed": 3, "width": 16, "heads": 2, "layers": 1, "chunk": 2, "latent_dim": 4,
             "execute_steps": 2, "image_size": 16, "diffusion_steps": 4, "epochs": 2,
@@ -52,6 +55,64 @@ def config(tmp_path):
 
 def changed(left, right):
     return any(not torch.equal(left[key], right[key]) for key in left)
+
+
+def test_three_camera_act_training_and_evaluation(config, monkeypatch):
+    from starter.config import load_config
+    from starter import launch
+
+    root = Path(__file__).resolve().parents[1]
+    cameras = load_config(root / "configs/act.yaml")["camera_names"]
+    assert cameras == ["cam_head", "cam_right_wrist", "cam_left_wrist"]
+    config = {**config, "camera_names": cameras, "epochs": 1}
+    path = offline("act", config)
+    payload = load_payload(path)
+    assert payload["model_config"]["camera_names"] == cameras
+    files, _ = split_episodes(config)
+    dataset = ChunkDataset(files, 2, 16, payload["stats"], camera_names=cameras)
+    sample = dataset[1]
+    assert sample["image"].shape == (3, 3, 16, 16)
+    with h5py.File(files[0], "r") as f:
+        observation = {"vision": {camera: {"color": f[f"vision/{camera}/colors"][1]} for camera in cameras},
+                       "state": {key: f[f"state/{key}s"][1] for key in ARM_KEYS}}
+    images, states = observation_arrays([observation], payload["stats"], 16, camera_names=cameras)
+    np.testing.assert_allclose(images[0] / 255, sample["image"], atol=1e-7)
+    np.testing.assert_allclose(states[0], sample["state"], atol=1e-6)
+    assert images[0, :, 0, 0, 0].tolist() == [41 + int(files[0].stem.split("_")[-1]),
+                                           101 + int(files[0].stem.split("_")[-1]),
+                                           161 + int(files[0].stem.split("_")[-1])]
+    policy = Policy(path)
+    prediction = policy.predict([observation])
+    assert prediction.shape == (1, 2, 16) and np.isfinite(prediction).all()
+    np.testing.assert_array_equal(prediction, Policy(path).predict([observation]))
+    del observation["vision"]["cam_left_wrist"]
+    with pytest.raises(KeyError, match="cam_left_wrist"):
+        policy.predict([observation])
+    with pytest.raises(ValueError, match="Multi-camera ACT"):
+        Learner("act", config, payload)
+    # The entry point must reject this checkpoint before launching Isaac.
+    def no_simulator(_config):
+        pytest.fail("Simulator must not start for a multi-camera PPO checkpoint")
+    monkeypatch.setattr(launch, "simulator_command", no_simulator)
+    monkeypatch.setattr("sys.argv", ["starter.launch", "act", "online", "--config", str(root / "configs/act.yaml"),
+                                     "--set", f"offline_checkpoint={path}"])
+    with pytest.raises(ValueError, match="Multi-camera ACT"):
+        launch.main()
+
+
+@pytest.mark.parametrize("problem", ["missing", "unaligned"])
+def test_three_camera_dataset_rejects_incomplete_episode(config, problem):
+    files, _ = split_episodes(config)
+    stats = normalization_stats(files)
+    key = "vision/cam_left_wrist/colors"
+    with h5py.File(files[0], "r+") as f:
+        frames = f[key][:-1]
+        del f[key]
+        if problem == "unaligned":
+            f.create_dataset(key, data=frames)
+    error, message = (KeyError, "cam_left_wrist") if problem == "missing" else (ValueError, "Unaligned")
+    with pytest.raises(error, match=message):
+        ChunkDataset(files, 2, 16, stats, camera_names=["cam_head", "cam_right_wrist", "cam_left_wrist"])
 
 
 @pytest.mark.parametrize("kind", ["act", "diffusion"])

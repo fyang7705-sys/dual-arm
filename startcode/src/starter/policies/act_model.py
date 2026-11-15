@@ -1,4 +1,4 @@
-"""Single-camera ACT: ResNet34, positional-attention Transformer and CVAE.
+"""Multi-camera ACT: shared ResNet34, positional-attention Transformer and CVAE.
 
 Architecture follows https://github.com/tonyzhaozh/act, adapted to EE16.
 Positions enter attention queries/keys; values carry content only.
@@ -75,6 +75,7 @@ class ACT(nn.Module):
         if width % 4:
             raise ValueError("ACT width must be divisible by 4 for 2-D position encoding")
         self.chunk, self.latent_dim = int(config["chunk"]), int(config["latent_dim"])
+        self.camera_names = list(config["camera_names"])
         backbone = resnet34(weights=None, norm_layer=FrozenBatchNorm2d)
         self.backbone = nn.Sequential(*list(backbone.children())[:-2])
         self.image_projection = nn.Conv2d(512, width, 1)
@@ -102,6 +103,8 @@ class ACT(nn.Module):
         self.backbone.load_state_dict(nn.Sequential(*list(source.children())[:-2]).state_dict())
 
     def forward(self, image, state, actions=None, valid=None):
+        if image.ndim != 5 or image.shape[1:3] != (len(self.camera_names), 3):
+            raise ValueError(f"ACT requires [B,{len(self.camera_names)},3,H,W] images in camera_names order")
         batch, width = len(state), self.queries.shape[-1]
         latent = state.new_zeros(batch, self.latent_dim)
         kl = state.new_zeros(())
@@ -118,8 +121,15 @@ class ACT(nn.Module):
             logvar = logvar.clamp(-10, 10)
             latent = mu + (.5 * logvar).exp() * torch.randn_like(mu)
             kl = (-.5 * (1 + logvar - mu.square() - logvar.exp())).sum(-1).mean()
-        feature = self.image_projection(self.backbone((image - self.image_mean) / self.image_std))
-        position = spatial_position(*feature.shape[-2:], width, image.device)
+        features, positions = [], []
+        for index in range(len(self.camera_names)):
+            feature = self.image_projection(self.backbone((image[:, index] - self.image_mean) / self.image_std))
+            height, columns = feature.shape[-2:]
+            features.append(feature)
+            positions.append(spatial_position(height, columns, width, image.device).reshape(1, height, columns, width))
+        # Match upstream ACT: concatenate feature maps and their own positions along width.
+        feature = torch.cat(features, dim=3)
+        position = torch.cat(positions, dim=2).flatten(1, 2)
         memory = torch.cat((self.latent_projection(latent)[:, None], self.state_projection(state)[:, None],
                             feature.flatten(2).transpose(1, 2)), 1)
         position = torch.cat((self.extra_position, position), 1)

@@ -44,6 +44,8 @@ class Learner:
     def __init__(self, kind, config, payload):
         self.kind, self.config, self.payload = kind, config, payload
         self.device, self.cfg, self.stats = pick_device(config), dict(payload["model_config"]), payload["stats"]
+        if kind == "act" and self.cfg["camera_names"] != ["cam_head"]:
+            raise ValueError("Multi-camera ACT supports offline training and evaluation; residual PPO requires cam_head only")
         self.model = build_model(kind, self.cfg).to(self.device)
         self.model.load_state_dict(payload.get("ema") or payload["model"])
         self.model.eval()  # no dropout or batch statistics in the actor
@@ -83,7 +85,7 @@ class Learner:
         image, state = tensor_observations(images, states, self.device)
         values = self.critic(image, state).cpu().numpy()
         if self.kind == "act":
-            base = self.model(image, state)[0]
+            base = self.model(image[:, None], state)[0]
             dist = self.actor.distribution(image, state, base)
             latent = dist.sample()
             action = base + self.scale * latent.tanh()

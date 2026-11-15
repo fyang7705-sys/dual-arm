@@ -28,7 +28,9 @@ def train(kind, config):
         raise ValueError("Resume requires the same train/validation files and split seed")
     stats = resume["stats"] if resume else normalization_stats(train_files)
     datasets = [ChunkDataset(paths, cfg["chunk"], cfg["image_size"], stats,
-                             obs_steps=cfg["n_obs_steps"] if kind == "diffusion" else None) for paths in (train_files, val_files)]
+                             obs_steps=cfg["n_obs_steps"] if kind == "diffusion" else None,
+                             camera_names=cfg["camera_names"] if kind == "act" else None)
+                for paths in (train_files, val_files)]
     batch_size, workers = int(config.get("batch_size", 32)), int(config.get("workers", 0))
     if batch_size < 1 or workers < 0:
         raise ValueError("batch_size must be positive and workers nonnegative")

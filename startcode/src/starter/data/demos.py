@@ -1,4 +1,4 @@
-"""Read real head-camera demonstrations; never silently train on dummy data."""
+"""Read real camera demonstrations; never silently train on dummy data."""
 from __future__ import annotations
 
 import bisect
@@ -115,17 +115,21 @@ def normalization_stats(files):
 
 
 class ChunkDataset:
-    """Map-style dataset: open one HDF5 per sample, read only one image/chunk.
+    """Map-style dataset: read synchronized camera frames and one action chunk.
 
     No persistent h5py handles cross DataLoader worker/fork boundaries. Padding
     stays inside its episode, and validation episodes never enter train stats.
     """
-    def __init__(self, files, chunk, image_size, stats, obs_steps=None):
+    def __init__(self, files, chunk, image_size, stats, obs_steps=None, camera_names=None):
         self.files, self.chunk, self.image_size, self.stats = list(files), int(chunk), image_size, stats
         shape = [image_size] if isinstance(image_size, int) else image_size
         if self.chunk < 1 or not shape or min(shape) < 16:
             raise ValueError("chunk must be positive and image_size >=16")
         self.temporal = obs_steps is not None
+        self.multiview = camera_names is not None
+        if self.multiview and self.temporal:
+            raise ValueError("Use camera_names for ACT or obs_steps for diffusion, not both")
+        self.camera_names = list(camera_names) if self.multiview else ["cam_head"]
         self.obs_steps = int(obs_steps) if self.temporal else 1
         if self.obs_steps < 1:
             raise ValueError("obs_steps must be positive")
@@ -134,7 +138,11 @@ class ChunkDataset:
         for path in self.files:
             with h5py.File(path, "r") as f:
                 lengths = [len(c) for kind in ("state", "action") for c in _columns(f[kind])]
-                lengths.append(len(f["vision/cam_head/colors"]))
+                for camera in self.camera_names:
+                    key = f"vision/{camera}/colors"
+                    if key not in f:
+                        raise KeyError(f"Missing camera {camera} in episode {path}")
+                    lengths.append(len(f[key]))
                 if min(lengths) < 1 or len(set(lengths)) != 1:
                     raise ValueError(f"Unaligned or empty episode {path}: {lengths}")
                 total += lengths[0]
@@ -150,14 +158,20 @@ class ChunkDataset:
             history = [max(0, start - self.obs_steps + 1 + i) for i in range(self.obs_steps)]
             state = np.stack([_pack_group(f["state"], t) for t in history])
             action = _pack_group(f["action"], slice(start, start + self.chunk))
-            image = np.stack([resize_rgb(f["vision/cam_head/colors"][t], self.image_size) for t in history])
+            if self.multiview:
+                image = np.stack([resize_rgb(f[f"vision/{camera}/colors"][start], self.image_size)
+                                  for camera in self.camera_names])
+            else:
+                image = np.stack([resize_rgb(f["vision/cam_head/colors"][t], self.image_size) for t in history])
         valid = np.arange(self.chunk) < len(action)
         action = np.concatenate([action, np.repeat(action[-1:], self.chunk - len(action), axis=0)])
         state = (state - self.stats["state_mean"]) / self.stats["state_std"]
         action = (action - self.stats["action_mean"]) / self.stats["action_std"]
         image = image.transpose(0, 3, 1, 2).astype(np.float32) / 255
         if not self.temporal:
-            image, state = image[0], state[0]
+            state = state[0]
+            if not self.multiview:
+                image = image[0]
         return {"image": image,
                 "state": state.astype(np.float32), "action": action.astype(np.float32), "valid": valid}
 
