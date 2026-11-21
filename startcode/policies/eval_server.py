@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import glob
+import os
 import sys
 from pathlib import Path
 
@@ -26,7 +27,6 @@ for entry in (REPO_ROOT / "src", XPL_ROOT, XPL_ROOT.parent):
     if str(entry) not in sys.path:
         sys.path.insert(0, str(entry))
 
-from starter.policies.act import load_policy  # noqa: E402
 from XPolicyLab.utils.process_data import unpack_robot_state  # noqa: E402
 from client_server.ws.model_server import PolicyServer, PolicyServerConfig  # noqa: E402
 
@@ -94,23 +94,23 @@ class ServePolicy:
     moves RPC payloads in and action dicts out.
     """
 
-    def __init__(self, checkpoint: Path, env_cfg: str, action_type: str, device: str) -> None:
+    def __init__(self, checkpoint: Path, env_cfg: str, action_type: str, device: str, *,
+                 temporal_agg_window: int = 1) -> None:
+        from starter.policies.runtime import Policy
+
         try:
-            self.policy = load_policy(checkpoint, device)
+            self.policy = Policy(checkpoint, device, temporal_agg_window=temporal_agg_window)
         except ValueError as error:
-            raise SystemExit(
-                f"{error}. This checkpoint predates the current policy format; "
-                "retrain with scripts/train_act.sh or scripts/train_dp.sh."
-            ) from error
+            raise SystemExit(str(error)) from error
         self.robot_info = robot_action_dim_info(env_cfg)
         self.action_type = action_type
         self.obs: dict | None = None
         self.batch_obs: dict[int, dict] = {}
-        config = getattr(self.policy, "config", {}) or {}
         print(f"[policy-server] checkpoint={checkpoint}")
+        window = f" temporal_agg_window={temporal_agg_window}" if self.policy.kind == "act" else ""
         print(
-            f"[policy-server] kind={getattr(self.policy, 'kind', '?')} "
-            f"execute_steps={config.get('execute_steps', '?')} device={device}"
+            f"[policy-server] kind={self.policy.kind}{window} "
+            f"execute_steps={self.policy.execute_steps} device={device}"
         )
 
     # -- RPC surface (single env) -------------------------------------------
@@ -156,13 +156,22 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--temporal-agg-window", type=int,
+                        help="ACT history window (1..checkpoint chunk), defaults to ACT_TEMPORAL_AGG_WINDOW or 1")
     args = parser.parse_args()
+    window = args.temporal_agg_window
+    if window is None and args.kind == "act":
+        try:
+            window = int(os.environ.get("ACT_TEMPORAL_AGG_WINDOW") or 1)
+        except ValueError:
+            parser.error("ACT_TEMPORAL_AGG_WINDOW must be an integer")
 
     import torch
 
     device = args.device if torch.cuda.is_available() else "cpu"
     model = ServePolicy(
-        resolve_checkpoint(args.kind, args.ckpt), args.env_cfg, args.action_type, device
+        resolve_checkpoint(args.kind, args.ckpt), args.env_cfg, args.action_type, device,
+        temporal_agg_window=1 if window is None else window,
     )
     if getattr(model.policy, "kind", args.kind) != args.kind:
         raise SystemExit(

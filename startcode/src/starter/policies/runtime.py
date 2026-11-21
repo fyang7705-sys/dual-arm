@@ -191,11 +191,40 @@ def project_actions(actions, fallback=None):
     return values
 
 
+class ACTTemporalEnsemble:
+    """Upstream ACT's exponential weighting, with bounded per-environment history."""
+    def __init__(self, window):
+        self.window = window
+        self.predictions = {}
+
+    def reset(self):
+        self.predictions.clear()
+
+    def update(self, actions, indices):
+        result = []
+        for prediction, index in zip(actions, indices):
+            history = self.predictions.setdefault(index, deque(maxlen=self.window))
+            history.append(prediction[:self.window].copy())
+            # Oldest prediction first, exactly as upstream all_time_actions[:, t].
+            candidates = np.stack([past[len(history) - 1 - i] for i, past in enumerate(history)])
+            weights = np.exp(-0.01 * np.arange(len(history)))
+            result.append(np.average(candidates, axis=0, weights=weights))
+        return np.asarray(result, dtype=actions.dtype)[:, None, :]
+
+
 class Policy:
-    def __init__(self, checkpoint, device="cpu"):
+    def __init__(self, checkpoint, device="cpu", *, temporal_agg_window=1):
         self.device = torch.device(device)
         self.payload = load_payload(checkpoint)
         self.kind, self.config, self.stats = self.payload["kind"], self.payload["model_config"], self.payload["stats"]
+        self.temporal_ensemble = None
+        if self.kind == "act":
+            chunk = int(self.config["chunk"])
+            if type(temporal_agg_window) is not int or not 1 <= temporal_agg_window <= chunk:
+                raise ValueError(f"temporal_agg_window must be an integer between 1 and chunk ({chunk})")
+            if temporal_agg_window > 1:
+                self.temporal_ensemble = ACTTemporalEnsemble(temporal_agg_window)
+        self.execute_steps = 1 if self.kind == "act" else int(self.config["execute_steps"])
         self.model = build_model(self.kind, self.config).to(self.device)
         self.model.load_state_dict(self.payload.get("ema") or self.payload["model"])
         self.model.eval()
@@ -214,6 +243,8 @@ class Policy:
     def reset(self):
         if self.history is not None:
             self.history.reset()
+        if self.temporal_ensemble is not None:
+            self.temporal_ensemble.reset()
 
     def observe(self, observations):
         if self.history is not None:
@@ -242,9 +273,12 @@ class Policy:
         mean = torch.as_tensor(self.stats["action_mean"], device=self.device)
         std = torch.as_tensor(self.stats["action_std"], device=self.device)
         decoded = (action * std + mean).cpu().numpy()
+        if self.temporal_ensemble is not None:
+            indices = [obs.get("env_idx", i) for i, obs in enumerate(observations)]
+            decoded = self.temporal_ensemble.update(decoded, indices)
         fallback = np.asarray([obs["proprio"] if "proprio" in obs else pack_ee_action(obs["state"])
                                for obs in observations])[:, None, :]
-        return project_actions(decoded, fallback)[:, :int(self.config["execute_steps"])]
+        return project_actions(decoded, fallback)[:, :self.execute_steps]
 
 
 def clone_state(model):

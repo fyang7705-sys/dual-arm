@@ -21,7 +21,7 @@
 #   --dry-run             print the resolved commands and exit
 #   -h | --help           show this help
 #
-# Environment overrides: POLICY_DIR, CKPT_NAME, POLICY_ENV, SIM_ENV, POLICY_PORT.
+# Environment overrides: POLICY_DIR, CKPT_NAME, POLICY_ENV, SIM_ENV, POLICY_PORT, ACT_TEMPORAL_AGG_WINDOW.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,6 +93,7 @@ from starter.config import load_config, require
 
 cfg = load_config(os.environ["CONFIG"])
 root = Path(os.environ["ROOT"])
+window = cfg.get("temporal_agg_window")
 
 policy_dir = Path(os.environ.get("POLICY_DIR") or require(cfg, "policy_dir"))
 if not policy_dir.is_absolute():
@@ -119,6 +120,7 @@ fields = {
     "POLICY_GPU": require(cfg, "policy_gpu"),
     "ENV_GPU": require(cfg, "env_gpu"),
     "SIM_ENV": cfg.get("sim_env", "robodojo"),
+    "ACT_TEMPORAL_AGG_WINDOW": os.environ.get("ACT_TEMPORAL_AGG_WINDOW") or ("" if window is None else window),
 }
 for key, value in fields.items():
     print(f"{key}={shlex.quote(str(value))}")
@@ -127,6 +129,7 @@ PY
 # shellcheck disable=SC1090
 source "${FIELDS_FILE}"
 rm -f "${FIELDS_FILE}"
+export ACT_TEMPORAL_AGG_WINDOW
 
 POLICY_DIR="${POLICY_DIR}"
 SIM_ENV="${SIM_ENV_OVERRIDE:-${SIM_ENV}}"

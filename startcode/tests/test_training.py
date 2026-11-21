@@ -83,7 +83,7 @@ def test_three_camera_act_training_and_evaluation(config, monkeypatch):
                                            161 + int(files[0].stem.split("_")[-1])]
     policy = Policy(path)
     prediction = policy.predict([observation])
-    assert prediction.shape == (1, 2, 16) and np.isfinite(prediction).all()
+    assert prediction.shape == (1, 1, 16) and np.isfinite(prediction).all()
     np.testing.assert_array_equal(prediction, Policy(path).predict([observation]))
     del observation["vision"]["cam_left_wrist"]
     with pytest.raises(KeyError, match="cam_left_wrist"):
@@ -124,7 +124,8 @@ def test_full_offline_online_save_load_resume(config, kind):
     env = ToyBatchEnv(2)
     observations, _ = env.reset_batch([1, 2])
     prediction = Policy(initial).predict(observations)
-    assert prediction.shape == (2, 2, 16) and np.isfinite(prediction).all()
+    execute_steps = 1 if kind == "act" else config["execute_steps"]
+    assert prediction.shape == (2, execute_steps, 16) and np.isfinite(prediction).all()
     result = online(kind, {**config, "offline_checkpoint": str(initial)})
     after = load_payload(result)
     if kind == "act":
@@ -290,7 +291,7 @@ def test_xpolicylab_official_ws_server_client(config, monkeypatch):
     monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
     path = offline("act", {**config, "epochs": 1})
-    model = eval_server.ServePolicy(Path(path), "arx_x5", "ee", "cpu")
+    model = eval_server.ServePolicy(Path(path), "arx_x5", "ee", "cpu", temporal_agg_window=2)
     ready = threading.Event()
     info = {}
     loop = asyncio.new_event_loop()
@@ -314,12 +315,12 @@ def test_xpolicylab_official_ws_server_client(config, monkeypatch):
         client.call(func_name="reset")
         client.call(func_name="update_obs", obs=observations[0])
         actions = client.call(func_name="get_action")
-        assert len(actions) == 2 and len(actions[0]["left_ee_pose"]) == 7
+        assert len(actions) == 1 and len(actions[0]["left_ee_pose"]) == 7
         for index, obs in enumerate(observations):
             obs["env_idx"] = index
         client.call(func_name="update_obs_batch", obs=observations)
         chunks = client.call(func_name="get_action_batch", obs=[1, 0])
-        assert len(chunks) == 2
+        assert [len(chunk) for chunk in chunks] == [1, 1]
     finally:
         client.close()
         asyncio.run_coroutine_threadsafe(server.stop(), loop).result(10)
