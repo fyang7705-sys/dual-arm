@@ -1,0 +1,22 @@
+{
+  "success_rate": 0.0,
+  "eval_time": 3,
+  "score": 0.0,
+  "details": {
+    "0": {
+      "layout_id": 0,
+      "success": false,
+      "score": 0.0
+    },
+    "1": {
+      "layout_id": 1,
+      "success": false,
+      "score": 0.0
+    },
+    "2": {
+      "layout_id": 2,
+      "success": false,
+      "score": 0.0
+    }
+  }
+}

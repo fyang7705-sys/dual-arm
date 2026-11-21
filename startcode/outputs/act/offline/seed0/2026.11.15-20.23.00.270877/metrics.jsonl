@@ -1,0 +1,15 @@
+{"epoch": 1, "train_loss": 0.357598399743672, "validation_loss": 0.3150576853683229, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 2, "train_loss": 0.18808472472225637, "validation_loss": 0.14783860533740478, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 3, "train_loss": 0.09445220364249494, "validation_loss": 0.1208899683101903, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 4, "train_loss": 0.06849664029126722, "validation_loss": 0.1084589283712395, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 5, "train_loss": 0.05721010747064062, "validation_loss": 0.09869388935832676, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 6, "train_loss": 0.04905136531190386, "validation_loss": 0.10515305473036735, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 7, "train_loss": 0.04426037250428274, "validation_loss": 0.10156278504571933, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 8, "train_loss": 0.038978804080422834, "validation_loss": 0.09440872418749827, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 9, "train_loss": 0.03782789234460037, "validation_loss": 0.09088927429449352, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 10, "train_loss": 0.034267760677607874, "validation_loss": 0.10191211472723008, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 11, "train_loss": 0.03254388886197599, "validation_loss": 0.09344702693409428, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 12, "train_loss": 0.030359867769069977, "validation_loss": 0.09761110898484127, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 13, "train_loss": 0.02893335434214433, "validation_loss": 0.08733418355704875, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 14, "train_loss": 0.02655300042470767, "validation_loss": 0.09044389592533884, "train_frames": 23855, "validation_frames": 2595}
+{"epoch": 15, "train_loss": 0.026217440363731033, "validation_loss": 0.09291792933996013, "train_frames": 23855, "validation_frames": 2595}
